@@ -328,23 +328,73 @@ class DataManager:
         self.trees_available = False
         return None
 
+    def _resolve_unit_name(self, unit_data, unit_id, strings):
+        """
+        Resolve unit name from unit data using LanguageNameId + offset
+
+        Args:
+            unit_data: Unit data dictionary
+            unit_id: Unit ID (as fallback)
+            strings: strings.json data
+
+        Returns:
+            Human-readable unit name or None if no good name found
+        """
+        # Try LanguageNameId + 9000 offset (this is how the game maps language IDs to string IDs)
+        lang_id = unit_data.get('LanguageNameId')
+        if lang_id:
+            string_id = str(lang_id + 9000)
+            name = strings.get(string_id)
+            if name and isinstance(name, str) and len(name) < 100:
+                # Clean up HTML breaks and normalize whitespace
+                import re
+                cleaned = name.replace('<br>', ' ').replace('\n', ' ').strip()
+                # Normalize multiple spaces to single space
+                cleaned = re.sub(r'\s+', ' ', cleaned)
+                # Only accept if it doesn't look like an HTML tag and has reasonable length
+                if '<' not in cleaned and '>' not in cleaned and 2 < len(cleaned) < 50:
+                    return cleaned
+
+        # Skip cryptic internal names - they are not useful for users
+        # These are typically ALL_CAPS codes like ARCHR, HCANR, ARELE, etc.
+        # We'll only return them if no better option exists
+        internal = unit_data.get('internal_name', '')
+        if internal:
+            # Check if internal name looks like a readable name (has lowercase letters or spaces)
+            # and is not just a code
+            if any(c.islower() for c in internal) or ' ' in internal:
+                return internal
+
+        # Return None for units without proper names - they'll be filtered out
+        return None
+
     def get_unit_names(self):
         """Get all unit names from data.json"""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         units = data_section.get('Unit', {})
-        return sorted(units.keys())
+        strings = self.data.get('strings', {})
+
+        unit_names = []
+        for unit_id, unit_data in units.items():
+            name = self._resolve_unit_name(unit_data, unit_id, strings)
+            if name:
+                unit_names.append(name)
+
+        return sorted(unit_names)
 
     def get_unit_data(self, unit_name):
         """Get unit data by name (case-insensitive)"""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         units = data_section.get('Unit', {})
+        strings = self.data.get('strings', {})
         unit_name_lower = unit_name.lower()
 
-        for name, data in units.items():
-            if name.lower() == unit_name_lower:
-                return {'name': name, **data}
+        for unit_id, unit_data in units.items():
+            resolved_name = self._resolve_unit_name(unit_data, unit_id, strings)
+            if resolved_name and resolved_name.lower() == unit_name_lower:
+                return {'name': resolved_name, **unit_data}
         return None
 
     def get_tech_names(self):
@@ -409,11 +459,13 @@ class DataManager:
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         units = data_section.get('Unit', {})
+        strings = self.data.get('strings', {})
 
         matches = []
-        for unit_name, unit_data in units.items():
-            if query_lower in unit_name.lower():
-                matches.append({'name': unit_name, **unit_data})
+        for unit_id, unit_data in units.items():
+            resolved_name = self._resolve_unit_name(unit_data, unit_id, strings)
+            if resolved_name and query_lower in resolved_name.lower():
+                matches.append({'name': resolved_name, **unit_data})
 
         return matches
 

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Discord bot commands for AoE2 information
 """
@@ -6,11 +7,26 @@ from discord.ext import commands
 import sys
 import os
 
-# Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manager.data_manager import DataManager
 from manager.retriever import DataRetriever
+
+
+def _cost_str(cost):
+    """Format {'Food': 60, 'Gold': 75} into '60 Food, 75 Gold'."""
+    if isinstance(cost, dict):
+        return ", ".join(f"{v} {k}" for k, v in cost.items() if v)
+    return str(cost)
+
+
+def _armor_str(armor):
+    """Format {'Melee': 2, 'Pierce': 3} into '2/3 (Melee/Pierce)'."""
+    if isinstance(armor, dict):
+        melee = armor.get("Melee", armor.get("melee", 0))
+        pierce = armor.get("Pierce", armor.get("pierce", 0))
+        return f"{melee}/{pierce} (Melee/Pierce)"
+    return str(armor)
+
 
 class AoE2Commands(commands.Cog):
     """AoE2 information commands"""
@@ -19,305 +35,306 @@ class AoE2Commands(commands.Cog):
         self.bot = bot
         self.retriever = DataRetriever()
 
-    @commands.command(name='civ')
-    async def civ_info(self, ctx, *, civ_name: str):
-        """Get information about a civilization
-        
-        Usage: ?civ <civilization name>
-        Example: ?civ Britons
-        """
-        try:
-            # Get civ info
-            civ_data = self.retriever.get_civ_info(civ_name)
+    # --------------------------------------------------------
+    # ?civ
+    # --------------------------------------------------------
 
-            if not civ_data:
-                await ctx.send(f"Could not find civilization: {civ_name}")
+    @commands.command(name="civ")
+    async def civ_info(self, ctx, *, civ_name: str):
+        """Get information about a civilization.  Usage: ?civ Britons"""
+        try:
+            civ = self.retriever.get_civ_info(civ_name)
+            if not civ:
+                await ctx.send(
+                    f"Could not find civilization: {civ_name}\n"
+                    f"Use `?civs` to see all available civs."
+                )
                 return
 
-            # Create embed
-            embed = discord.Embed(
-                title=f"{civ_data['name']}",
-                color=discord.Color.gold()
-            )
+            embed = discord.Embed(title=civ["name"], color=discord.Color.gold())
 
-            # Add bonuses
-            if 'bonuses' in civ_data and civ_data['bonuses']:
-                bonuses_text = '\n'.join([f"- {bonus}" for bonus in civ_data['bonuses'][:5]])
-                embed.add_field(name="Bonuses", value=bonuses_text, inline=False)
+            bonuses = civ.get("bonuses", [])
+            if bonuses:
+                embed.add_field(
+                    name="Civilization Bonuses",
+                    value="\n".join(f"- {b}" for b in bonuses),
+                    inline=False,
+                )
+            else:
+                embed.add_field(
+                    name="Civilization Bonuses",
+                    value="No bonus data found. Check console and run ?debugciv " + civ["name"],
+                    inline=False,
+                )
 
-            # Add team bonus
-            if 'team_bonus' in civ_data and civ_data['team_bonus']:
-                embed.add_field(name="Team Bonus", value=civ_data['team_bonus'], inline=False)
+            tb = civ.get("team_bonus", "")
+            if tb:
+                embed.add_field(name="Team Bonus", value=tb, inline=False)
 
-            # Add unique units
-            if 'unique_units' in civ_data and civ_data['unique_units']:
-                units_text = ', '.join(civ_data['unique_units'])
-                embed.add_field(name="Unique Units", value=units_text, inline=True)
+            uu = civ.get("unique_units", [])
+            if uu:
+                embed.add_field(name="Unique Units", value=", ".join(uu), inline=True)
 
-            # Add unique techs
-            if 'unique_techs' in civ_data and civ_data['unique_techs']:
-                techs_text = ', '.join(civ_data['unique_techs'])
-                embed.add_field(name="Unique Techs", value=techs_text, inline=True)
+            ut = civ.get("unique_techs", [])
+            if ut:
+                embed.add_field(name="Unique Techs", value=", ".join(ut), inline=True)
 
+            embed.set_footer(text="Data: aoe2techtree.net | Use ?compare <civ1> <civ2> to compare")
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"Error retrieving civilization info: {str(e)}")
+            await ctx.send(f"Error retrieving civilization info: {e}")
             print(f"Error in civ_info: {e}")
 
-    @commands.command(name='civs')
+    # --------------------------------------------------------
+    # ?debugciv  -- dumps raw civ data so we can see the actual keys
+    # --------------------------------------------------------
+
+    @commands.command(name="debugciv")
+    async def debug_civ(self, ctx, *, civ_name: str):
+        """Dump raw civ data for debugging.  Usage: ?debugciv Britons"""
+        try:
+            raw = self.retriever.data_manager.get_civ_data(civ_name)
+            if not raw:
+                await ctx.send(f"Could not find civ: {civ_name}")
+                return
+            keys = list(raw.keys())
+            sample = str(raw)[:800]
+            await ctx.send(f"Keys: {keys}\n\nSample:\n```\n{sample}\n```")
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+
+    # --------------------------------------------------------
+    # ?civs
+    # --------------------------------------------------------
+
+    @commands.command(name="civs")
     async def list_civs(self, ctx):
-        """List all available civilizations
-        
-        Usage: ?civs
-        """
+        """List all available civilizations.  Usage: ?civs"""
         try:
             civs = self.retriever.get_all_civs()
-
             if not civs:
-                await ctx.send("No civilizations found in database.")
+                await ctx.send("No civilizations found.")
                 return
 
-            # Split into chunks for multiple embeds if needed
-            chunk_size = 20
-            civ_chunks = [civs[i:i + chunk_size] for i in range(0, len(civs), chunk_size)]
-
-            for i, chunk in enumerate(civ_chunks):
+            chunk_size = 24
+            chunks = [civs[i:i + chunk_size] for i in range(0, len(civs), chunk_size)]
+            for i, chunk in enumerate(chunks):
                 embed = discord.Embed(
-                    title=f"Age of Empires 2 Civilizations ({i+1}/{len(civ_chunks)})",
-                    description=', '.join(chunk),
-                    color=discord.Color.blue()
+                    title=f"Age of Empires 2 Civilizations ({i + 1}/{len(chunks)})",
+                    description=", ".join(chunk),
+                    color=discord.Color.blue(),
                 )
-                embed.set_footer(text=f"Total: {len(civs)} civilizations | Use ?civ <name> for details")
+                embed.set_footer(text=f"Total: {len(civs)} civilizations | Use ?civ <n> for details")
                 await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"Error retrieving civilizations: {str(e)}")
-            print(f"Error in list_civs: {e}")
+            await ctx.send(f"Error retrieving civilizations: {e}")
 
-    @commands.command(name='unit')
+    # --------------------------------------------------------
+    # ?unit
+    # --------------------------------------------------------
+
+    @commands.command(name="unit")
     async def unit_info(self, ctx, *, unit_name: str):
-        """Get information about a unit
-        
-        Usage: ?unit <unit name>
-        Example: ?unit Knight
-        """
+        """Get unit stats.  Usage: ?unit Knight"""
         try:
-            # Get unit info
-            unit_data = self.retriever.get_unit_info(unit_name)
-
-            if not unit_data:
-                await ctx.send(f"Could not find unit: {unit_name}")
+            unit = self.retriever.get_unit_info(unit_name)
+            if not unit:
+                await ctx.send(
+                    f"Could not find unit: {unit_name}\n"
+                    f"Use `?units` to browse all units."
+                )
                 return
 
-            # Create embed
-            embed = discord.Embed(
-                title=f"{unit_data['name']}",
-                color=discord.Color.red()
-            )
+            embed = discord.Embed(title=unit["name"], color=discord.Color.red())
 
-            # Add available stats
-            stats_added = False
+            cost = unit.get("Cost")
+            if cost:
+                embed.add_field(name="Cost", value=_cost_str(cost), inline=True)
 
-            # Cost
-            if 'Cost' in unit_data:
-                cost = unit_data['Cost']
-                if isinstance(cost, dict):
-                    cost_text = ', '.join([f"{v} {k}" for k, v in cost.items()])
-                    embed.add_field(name="Cost", value=cost_text, inline=True)
-                    stats_added = True
+            hp = unit.get("HP")
+            if hp is not None:
+                embed.add_field(name="HP", value=str(hp), inline=True)
 
-            # HP
-            if 'HP' in unit_data:
-                embed.add_field(name="HP", value=str(unit_data['HP']), inline=True)
-                stats_added = True
+            attack = unit.get("Attack")
+            if attack is not None:
+                embed.add_field(name="Attack", value=str(attack), inline=True)
 
-            # Attack
-            if 'Attack' in unit_data:
-                embed.add_field(name="Attack", value=str(unit_data['Attack']), inline=True)
-                stats_added = True
+            armor = unit.get("Armor")
+            if armor is not None:
+                embed.add_field(name="Armor", value=_armor_str(armor), inline=True)
 
-            # Armor
-            if 'Armor' in unit_data:
-                armor = unit_data['Armor']
-                if isinstance(armor, dict):
-                    armor_text = ', '.join([f"{v} {k}" for k, v in armor.items()])
-                    embed.add_field(name="Armor", value=armor_text, inline=True)
-                    stats_added = True
+            speed = unit.get("Speed")
+            if speed is not None:
+                embed.add_field(name="Speed", value=str(speed), inline=True)
 
-            # Speed
-            if 'Speed' in unit_data:
-                embed.add_field(name="Speed", value=str(unit_data['Speed']), inline=True)
-                stats_added = True
+            rng = unit.get("Range")
+            if rng is not None:
+                embed.add_field(name="Range", value=str(rng), inline=True)
 
-            # Range
-            if 'Range' in unit_data:
-                embed.add_field(name="Range", value=str(unit_data['Range']), inline=True)
-                stats_added = True
+            rate = unit.get("AttackRate") or unit.get("Rate of Fire")
+            if rate is not None:
+                embed.add_field(name="Attack Rate", value=str(rate), inline=True)
 
-            if not stats_added:
+            los = unit.get("LineOfSight")
+            if los is not None:
+                embed.add_field(name="Line of Sight", value=str(los), inline=True)
+
+            if not embed.fields:
                 embed.description = "Detailed stats not available for this unit."
 
+            embed.set_footer(text="Use ?units to see all units")
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"Error retrieving unit info: {str(e)}")
+            await ctx.send(f"Error retrieving unit info: {e}")
             print(f"Error in unit_info: {e}")
 
-    @commands.command(name='units')
+    # --------------------------------------------------------
+    # ?units
+    # --------------------------------------------------------
+
+    @commands.command(name="units")
     async def list_units(self, ctx):
-        """List all available units
-        
-        Usage: ?units
-        """
+        """List all units.  Usage: ?units"""
         try:
             units = self.retriever.get_all_units()
-
             if not units:
-                await ctx.send("No units found in database.")
+                await ctx.send("No units found.")
                 return
 
-            # Split into chunks
             chunk_size = 30
-            unit_chunks = [units[i:i + chunk_size] for i in range(0, len(units), chunk_size)]
-
-            for i, chunk in enumerate(unit_chunks):
+            chunks = [units[i:i + chunk_size] for i in range(0, len(units), chunk_size)]
+            for i, chunk in enumerate(chunks):
                 embed = discord.Embed(
-                    title=f"Age of Empires 2 Units ({i+1}/{len(unit_chunks)})",
-                    description=', '.join(chunk),
-                    color=discord.Color.green()
+                    title=f"Age of Empires 2 Units ({i + 1}/{len(chunks)})",
+                    description=", ".join(chunk),
+                    color=discord.Color.green(),
                 )
-                embed.set_footer(text=f"Total: {len(units)} units | Use ?unit <name> for details")
+                embed.set_footer(text=f"Total: {len(units)} units | Use ?unit <n> for details")
                 await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"Error retrieving units: {str(e)}")
-            print(f"Error in list_units: {e}")
+            await ctx.send(f"Error retrieving units: {e}")
 
-    @commands.command(name='tech')
+    # --------------------------------------------------------
+    # ?tech
+    # --------------------------------------------------------
+
+    @commands.command(name="tech")
     async def tech_info(self, ctx, *, tech_name: str):
-        """Get information about a technology
-        
-        Usage: ?tech <technology name>
-        Example: ?tech Ballistics
-        """
+        """Get technology information.  Usage: ?tech Ballistics"""
         try:
-            # Get tech info
-            tech_data = self.retriever.get_tech_info(tech_name)
-
-            if not tech_data:
+            tech = self.retriever.get_tech_info(tech_name)
+            if not tech:
                 await ctx.send(f"Could not find technology: {tech_name}")
                 return
 
-            # Create embed
-            embed = discord.Embed(
-                title=f"{tech_data['name']}",
-                color=discord.Color.purple()
-            )
+            embed = discord.Embed(title=tech["name"], color=discord.Color.purple())
 
-            # Add available info
-            if 'Cost' in tech_data:
-                cost = tech_data['Cost']
-                if isinstance(cost, dict):
-                    cost_text = ', '.join([f"{v} {k}" for k, v in cost.items()])
-                    embed.add_field(name="Cost", value=cost_text, inline=True)
+            cost = tech.get("Cost")
+            if cost:
+                embed.add_field(name="Cost", value=_cost_str(cost), inline=True)
 
-            if 'ResearchTime' in tech_data:
-                embed.add_field(name="Research Time", value=f"{tech_data['ResearchTime']}s", inline=True)
+            research_time = tech.get("ResearchTime") or tech.get("ResearchDuration")
+            if research_time is not None:
+                embed.add_field(name="Research Time", value=f"{research_time}s", inline=True)
 
-            embed.description = "Use this technology to improve your civilization!"
-
+            embed.set_footer(text="Use ?techs to browse all technologies")
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"Error retrieving technology info: {str(e)}")
-            print(f"Error in tech_info: {e}")
+            await ctx.send(f"Error retrieving technology info: {e}")
 
-    @commands.command(name='datainfo')
-    async def data_info(self, ctx):
-        """Get information about the loaded game data
-        
-        Usage: ?datainfo
-        """
-        try:
-            info = self.retriever.get_data_info()
+    # --------------------------------------------------------
+    # ?compare
+    # --------------------------------------------------------
 
-            embed = discord.Embed(
-                title="AoE2 Data Information",
-                color=discord.Color.blue()
-            )
-
-            embed.add_field(name="Civilizations", value=info.get('civs_count', 0), inline=True)
-            embed.add_field(name="Units", value=info.get('units_count', 0), inline=True)
-            embed.add_field(name="Technologies", value=info.get('techs_count', 0), inline=True)
-            embed.add_field(name="Buildings", value=info.get('buildings_count', 0), inline=True)
-            embed.add_field(name="Ages", value=info.get('ages_count', 0), inline=True)
-            embed.add_field(name="Loaded Civ Trees", value=info.get('loaded_civ_trees', 0), inline=True)
-
-            if 'last_update' in info:
-                embed.add_field(name="Last Update", value=info['last_update'], inline=False)
-
-            embed.set_footer(text="Data source: github.com/SiegeEngineers/aoe2techtree")
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"Error retrieving data info: {str(e)}")
-            print(f"Error in data_info: {e}")
-
-    @commands.command(name='compare')
+    @commands.command(name="compare")
     async def compare_civs(self, ctx, civ1: str, *, civ2: str):
-        """Compare two civilizations
-        
-        Usage: ?compare <civ1> <civ2>
-        Example: ?compare Britons Franks
-        """
+        """Compare two civilizations.  Usage: ?compare Britons Franks"""
         try:
-            comparison = self.retriever.compare_civs(civ1, civ2)
-
-            if not comparison:
-                await ctx.send("Could not compare civilizations. Check the names and try again.")
+            comp = self.retriever.compare_civs(civ1, civ2)
+            if not comp:
+                await ctx.send(
+                    "Could not find one or both civilizations. "
+                    "Use `?civs` to see all names."
+                )
                 return
 
+            c1, c2 = comp["civ1"], comp["civ2"]
             embed = discord.Embed(
-                title=f"{comparison['civ1']['name']} vs {comparison['civ2']['name']}",
-                color=discord.Color.orange()
+                title=f"{c1['name']} vs {c2['name']}",
+                color=discord.Color.orange(),
             )
 
-            # Civ 1 bonuses
-            if 'bonuses' in comparison['civ1']:
-                bonuses1 = '\n'.join([f"- {b}" for b in comparison['civ1']['bonuses'][:3]])
-                embed.add_field(name=f"{comparison['civ1']['name']} Bonuses", value=bonuses1, inline=True)
+            def bonus_block(civ_data):
+                bonuses = civ_data.get("bonuses", [])
+                tb = civ_data.get("team_bonus", "")
+                uu = civ_data.get("unique_units", [])
+                ut = civ_data.get("unique_techs", [])
+                lines = [f"- {b}" for b in bonuses[:5]]
+                if tb:
+                    lines.append(f"Team bonus: {tb}")
+                if uu:
+                    lines.append(f"Unique units: {', '.join(uu)}")
+                if ut:
+                    lines.append(f"Unique techs: {', '.join(ut)}")
+                return "\n".join(lines) or "No data"
 
-            # Civ 2 bonuses
-            if 'bonuses' in comparison['civ2']:
-                bonuses2 = '\n'.join([f"- {b}" for b in comparison['civ2']['bonuses'][:3]])
-                embed.add_field(name=f"{comparison['civ2']['name']} Bonuses", value=bonuses2, inline=True)
-
-            embed.set_footer(text="Use ?civ <name> for full details")
-
+            embed.add_field(name=c1["name"], value=bonus_block(c1), inline=True)
+            embed.add_field(name=c2["name"], value=bonus_block(c2), inline=True)
+            embed.set_footer(text="Use ?civ <n> for full details")
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"Error comparing civilizations: {str(e)}")
-            print(f"Error in compare_civs: {e}")
+            await ctx.send(f"Error comparing civilizations: {e}")
 
-    @commands.command(name='updatedata')
-    @commands.has_permissions(administrator=True)
-    async def force_update(self, ctx):
-        """Force update game data from GitHub (Admin only)
-        
-        Usage: ?updatedata
-        """
+    # --------------------------------------------------------
+    # ?datainfo
+    # --------------------------------------------------------
+
+    @commands.command(name="datainfo")
+    async def data_info(self, ctx):
+        """Show loaded data statistics.  Usage: ?datainfo"""
         try:
-            await ctx.send("Updating data from GitHub...")
-            self.retriever.force_data_update()
-            await ctx.send("Data updated successfully!")
+            info = self.retriever.get_data_info()
+            embed = discord.Embed(title="AoE2 Data Info", color=discord.Color.blue())
+            embed.add_field(name="Civilizations", value=info.get("civs_count", 0), inline=True)
+            embed.add_field(name="Units", value=info.get("units_count", 0), inline=True)
+            embed.add_field(name="Technologies", value=info.get("techs_count", 0), inline=True)
+            embed.add_field(name="Buildings", value=info.get("buildings_count", 0), inline=True)
+            if "last_update" in info:
+                embed.add_field(name="Cache Updated", value=info["last_update"], inline=False)
+            embed.set_footer(text="Data source: github.com/SiegeEngineers/aoe2techtree")
+            await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"Error updating data: {str(e)}")
-            print(f"Error in force_update: {e}")
+            await ctx.send(f"Error retrieving data info: {e}")
+
+    # --------------------------------------------------------
+    # ?updatedata  (admin only)
+    # --------------------------------------------------------
+
+    @commands.command(name="updatedata")
+    @commands.has_permissions(administrator=True)
+    async def force_update(self, ctx):
+        """Force refresh data from GitHub. Admin only.  Usage: ?updatedata"""
+        try:
+            await ctx.send("Updating data from GitHub, please wait...")
+            self.retriever.force_data_update()
+            info = self.retriever.get_data_info()
+            await ctx.send(
+                f"Data updated successfully!\n"
+                f"Civs: {info['civs_count']} | "
+                f"Units: {info['units_count']} | "
+                f"Techs: {info['techs_count']} | "
+                f"Buildings: {info['buildings_count']}"
+            )
+        except Exception as e:
+            await ctx.send(f"Error updating data: {e}")
+
 
 async def setup(bot):
-    """Setup function to add the cog to the bot"""
     await bot.add_cog(AoE2Commands(bot))

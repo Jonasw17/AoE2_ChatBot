@@ -1,364 +1,327 @@
+# -*- coding: utf-8 -*-
+"""
+Data Manager for AoE2 Discord Bot
+Handles downloading and caching data from github.com/SiegeEngineers/aoe2techtree
+
+How the data source is actually structured
+-------------------------------------------
+data.json
+  civs:
+    "Britons":
+      bons: [list of bonus strings]
+      team_bonus: "..."
+      unique:
+        units: ["Longbowman", ...]
+        techs: ["Yeoman", ...]
+  data:
+    Unit:
+      "75":
+        LanguageNameId: 5169      <-- look THIS up in strings.json, NOT "75"
+        Cost: {Food: 60, Gold: 75}
+        HP: 100
+        Attack: 10
+        Armor: {Melee: 2, Pierce: 3}
+        Speed: 1.35
+        Range: 0
+    Tech:
+      "93":
+        LanguageNameId: 7082
+        Cost: {...}
+        ResearchTime: 35
+    Building:
+      "45":
+        LanguageNameId: 5011
+        Cost: {...}
+        HP: 2400
+
+locales/en/strings.json
+  "5169": "Knight"
+  "7082": "Ballistics"
+  "5011": "Castle"
+
+IMPORTANT: The key in data.json["data"]["Unit"] is a numeric unit ID.
+The human name for that unit lives at strings[unit["LanguageNameId"]].
+The unit ID and the LanguageNameId are DIFFERENT numbers.
+"""
+
 import json
-import os
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
-import time
+
+
+BASE_URL = "https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data"
+DATA_URL = f"{BASE_URL}/data.json"
+STRINGS_URL = f"{BASE_URL}/locales/en/strings.json"
+
 
 class DataManager:
-    """Manage AoE2 data from GitHub JSON files"""
+    """
+    Downloads and caches AoE2 data.
+    Uses LanguageNameId inside each unit/tech/building entry to resolve
+    the human-readable name from strings.json.
+    """
 
     def __init__(self, data_dir="data", cache_hours=24):
-        """
-        Initialize the data manager
-
-        Args:
-            data_dir: Directory to store cached JSON files
-            cache_hours: Hours before re-downloading data
-        """
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         self.cache_hours = cache_hours
 
-        # GitHub raw content URLs
-        self.base_url = "https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data"
+        self._data = {}
+        self._strings = {}
 
-        # Data file paths - data.json contains EVERYTHING
-        self.files = {
-            'main': 'data.json',  # Contains: civ_names, tech_tree_strings, age_names, building_names, unit_names, tech_names, civ_helptexts
-        }
+        # name -> internal numeric id (the key in data.json["data"]["Unit"])
+        self._unit_name_to_id = {}
+        self._unit_id_to_name = {}
+        self._tech_name_to_id = {}
+        self._tech_id_to_name = {}
+        self._building_name_to_id = {}
+        self._building_id_to_name = {}
 
-        # Trees directory for per-civ tech trees
-        self.trees_url = f"{self.base_url}/trees"
-
-        # Loaded data cache
-        self.data = {}
-        self.civ_trees = {}  # Separate cache for individual civ trees
-
-        # Load data on initialization
         self.load_all_data()
 
-    def _get_cache_file(self, filename):
-        """Get the local cache file path"""
+    # --------------------------------------------------------
+    # Cache helpers
+    # --------------------------------------------------------
+
+    def _cache_path(self, filename):
         return self.data_dir / filename
 
-    def _is_cache_valid(self, filepath):
-        """Check if cached file is still valid"""
-        if not filepath.exists():
+    def _cache_valid(self, path):
+        if not path.exists():
             return False
-
-        # Check file age
-        file_time = datetime.fromtimestamp(filepath.stat().st_mtime)
-        age = datetime.now() - file_time
-
+        age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
         return age < timedelta(hours=self.cache_hours)
 
-    def _download_file(self, filename, url):
-        """Download a file from GitHub"""
+    def _download_json(self, url, cache_filename):
+        path = self._cache_path(cache_filename)
         try:
-            print(f"Downloading {filename}...")
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-
-            # Save to cache
-            cache_file = self._get_cache_file(filename)
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(response.json(), f, indent=2)
-
-            print(f"Downloaded {filename} successfully")
-            return response.json()
-        except requests.RequestException as e:
-            print(f"Error downloading {filename}: {e}")
+            print(f"Downloading {cache_filename}...")
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            print(f"Saved {cache_filename}")
+            return data
+        except Exception as e:
+            print(f"Download failed for {cache_filename}: {e}")
             return None
 
-    def _load_file(self, key, filename):
-        """Load a data file (from cache or download)"""
-        cache_file = self._get_cache_file(filename)
+    def _load_cached_json(self, cache_filename):
+        path = self._cache_path(cache_filename)
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error reading cache {cache_filename}: {e}")
+        return None
 
-        # Use cache if valid
-        if self._is_cache_valid(cache_file):
-            print(f"Loading {filename} from cache...")
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+    def _get_json(self, url, cache_filename):
+        """Return from valid cache if possible, otherwise download.
+        Falls back to stale cache if download fails."""
+        path = self._cache_path(cache_filename)
+        if self._cache_valid(path):
+            print(f"Loading {cache_filename} from cache...")
+            return self._load_cached_json(cache_filename) or {}
 
-        # Download if cache invalid or missing
-        url = f"{self.base_url}/{filename}"
-        data = self._download_file(filename, url)
+        data = self._download_json(url, cache_filename)
+        if data is not None:
+            return data
 
-        # Fallback to cache if download failed
-        if data is None and cache_file.exists():
-            print(f"Download failed, using cached {filename}")
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        stale = self._load_cached_json(cache_filename)
+        if stale:
+            print(f"Using stale cache for {cache_filename}")
+            return stale
 
-        return data
+        print(f"WARNING: No data available for {cache_filename}")
+        return {}
+
+    # --------------------------------------------------------
+    # Load and build lookups
+    # --------------------------------------------------------
 
     def load_all_data(self):
-        """Load all data files"""
         print("Loading AoE2 data...")
-
-        for key, filename in self.files.items():
-            data = self._load_file(key, filename)
-            if data:
-                self.data[key] = data
-            else:
-                print(f"Warning: Failed to load {filename}")
-                self.data[key] = {}
-
-        print("Data loading complete!")
+        self._data = self._get_json(DATA_URL, "data.json")
+        self._strings = self._get_json(STRINGS_URL, "strings.json")
+        self._build_lookups()
+        print(
+            f"Ready. Civs: {len(self.get_civ_names())}, "
+            f"Units: {len(self._unit_name_to_id)}, "
+            f"Techs: {len(self._tech_name_to_id)}, "
+            f"Buildings: {len(self._building_name_to_id)}"
+        )
 
     def force_update(self):
-        """Force download of fresh data"""
         print("Forcing data update...")
+        self._data = self._download_json(DATA_URL, "data.json") or self._data
+        self._strings = self._download_json(STRINGS_URL, "strings.json") or self._strings
+        self._build_lookups()
+        print("Update complete.")
 
-        for key, filename in self.files.items():
-            url = f"{self.base_url}/{filename}"
-            data = self._download_file(filename, url)
-            if data:
-                self.data[key] = data
+    def _build_lookups(self):
+        """
+        Build name<->id dicts for units, techs, and buildings.
 
-        print("Data update complete!")
+        For each entry in data.json["data"]["Unit"]:
+          - The dict key  (e.g. "75")  is the unit's internal ID
+          - entry["LanguageNameId"]    is the key to look up in strings.json
+          - strings[str(LanguageNameId)] is the human name (e.g. "Knight")
+
+        Entries are skipped if:
+          - LanguageNameId is missing or 0
+          - The resolved name is empty or longer than 60 chars (help text)
+        """
+        data_section = self._data.get("data", {})
+
+        def build(section_key):
+            name_to_id = {}
+            id_to_name = {}
+            section = data_section.get(section_key, {})
+            for entry_id, entry_data in section.items():
+                if not isinstance(entry_data, dict):
+                    continue
+
+                lang_id = entry_data.get("LanguageNameId", 0)
+                if not lang_id:
+                    continue
+
+                name = self._strings.get(str(lang_id), "").strip()
+                if not name or len(name) > 60:
+                    continue
+
+                name_to_id[name] = str(entry_id)
+                id_to_name[str(entry_id)] = name
+
+            return name_to_id, id_to_name
+
+        self._unit_name_to_id, self._unit_id_to_name = build("Unit")
+        self._tech_name_to_id, self._tech_id_to_name = build("Tech")
+        self._building_name_to_id, self._building_id_to_name = build("Building")
+
+    # --------------------------------------------------------
+    # Civilization
+    # --------------------------------------------------------
 
     def get_civ_names(self):
-        """Get list of all civilization names from data.json"""
-        main_data = self.data.get('main', {})
-        civs = main_data.get('civs', {})
-        return sorted(civs.keys())
+        return sorted(self._data.get("civs", {}).keys())
 
     def get_civ_data(self, civ_name):
-        """Get civilization data by name (case-insensitive)"""
-        main_data = self.data.get('main', {})
-        civs = main_data.get('civs', {})
-        civ_name_lower = civ_name.lower()
-
+        civs = self._data.get("civs", {})
         for name, data in civs.items():
-            if name.lower() == civ_name_lower:
-                return {'name': name, **data}
+            if name.lower() == civ_name.lower():
+                return {"name": name, **data}
         return None
 
-    def load_civ_tree(self, civ_name):
-        """
-        Load individual civ tech tree from data/trees/
-        Returns the full tech tree data for a specific civilization
-        """
-        # Check cache first
-        if civ_name in self.civ_trees:
-            return self.civ_trees[civ_name]
-
-        # Construct filename (trees use lowercase with underscores)
-        filename = f"{civ_name.lower().replace(' ', '_')}.json"
-        cache_file = self.data_dir / f"tree_{filename}"
-
-        # Check if cached file is valid
-        if self._is_cache_valid(cache_file):
-            print(f"Loading {civ_name} tree from cache...")
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                tree_data = json.load(f)
-                self.civ_trees[civ_name] = tree_data
-                return tree_data
-
-        # Download from trees directory
-        url = f"{self.trees_url}/{filename}"
-        try:
-            print(f"Downloading {civ_name} tech tree...")
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            tree_data = response.json()
-
-            # Save to cache
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(tree_data, f, indent=2)
-
-            self.civ_trees[civ_name] = tree_data
-            return tree_data
-        except requests.RequestException as e:
-            print(f"Error downloading {civ_name} tree: {e}")
-
-            # Try to load from cache even if expired
-            if cache_file.exists():
-                print(f"Using expired cache for {civ_name} tree")
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    tree_data = json.load(f)
-                    self.civ_trees[civ_name] = tree_data
-                    return tree_data
-
-            return None
+    # --------------------------------------------------------
+    # Units
+    # --------------------------------------------------------
 
     def get_unit_names(self):
-        """Get all unit names from data.json"""
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        units = data_section.get('Unit', {})
-        return sorted(units.keys())
+        return sorted(self._unit_name_to_id.keys())
 
     def get_unit_data(self, unit_name):
-        """Get unit data by name (case-insensitive)"""
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        units = data_section.get('Unit', {})
-        unit_name_lower = unit_name.lower()
+        target = unit_name.lower()
+        unit_id = None
+        for name, uid in self._unit_name_to_id.items():
+            if name.lower() == target:
+                unit_id = uid
+                break
+        if unit_id is None:
+            return None
+        raw = self._data.get("data", {}).get("Unit", {}).get(unit_id)
+        if raw is None:
+            return None
+        return {"name": self._unit_id_to_name[unit_id], **raw}
 
-        for name, data in units.items():
-            if name.lower() == unit_name_lower:
-                return {'name': name, **data}
-        return None
+    # --------------------------------------------------------
+    # Technologies
+    # --------------------------------------------------------
 
     def get_tech_names(self):
-        """Get all technology names from data.json"""
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        techs = data_section.get('Tech', {})
-        return sorted(techs.keys())
+        return sorted(self._tech_name_to_id.keys())
 
     def get_tech_data(self, tech_name):
-        """Get technology data by name (case-insensitive)"""
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        techs = data_section.get('Tech', {})
-        tech_name_lower = tech_name.lower()
+        target = tech_name.lower()
+        tech_id = None
+        for name, tid in self._tech_name_to_id.items():
+            if name.lower() == target:
+                tech_id = tid
+                break
+        if tech_id is None:
+            return None
+        raw = self._data.get("data", {}).get("Tech", {}).get(tech_id)
+        if raw is None:
+            return None
+        return {"name": self._tech_id_to_name[tech_id], **raw}
 
-        for name, data in techs.items():
-            if name.lower() == tech_name_lower:
-                return {'name': name, **data}
-        return None
+    # --------------------------------------------------------
+    # Buildings
+    # --------------------------------------------------------
 
     def get_building_names(self):
-        """Get all building names from data.json"""
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        buildings = data_section.get('Building', {})
-        return sorted(buildings.keys())
+        return sorted(self._building_name_to_id.keys())
 
     def get_building_data(self, building_name):
-        """Get building data by name (case-insensitive)"""
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        buildings = data_section.get('Building', {})
-        building_name_lower = building_name.lower()
+        target = building_name.lower()
+        building_id = None
+        for name, bid in self._building_name_to_id.items():
+            if name.lower() == target:
+                building_id = bid
+                break
+        if building_id is None:
+            return None
+        raw = self._data.get("data", {}).get("Building", {}).get(building_id)
+        if raw is None:
+            return None
+        return {"name": self._building_id_to_name[building_id], **raw}
 
-        for name, data in buildings.items():
-            if name.lower() == building_name_lower:
-                return {'name': name, **data}
-        return None
-
-    def get_age_names(self):
-        """Get all age names from data.json"""
-        main_data = self.data.get('main', {})
-        age_names = main_data.get('age_names', {})
-        # age_names structure has nested data, extract the values
-        result = {}
-        for age_key, age_data in age_names.items():
-            if isinstance(age_data, dict):
-                result[age_key] = age_data
-            elif isinstance(age_data, list):
-                result[age_key] = age_data
-        return result
-
-    def get_tech_tree_strings(self):
-        """Get tech tree strings from data.json"""
-        main_data = self.data.get('main', {})
-        return main_data.get('tech_tree_strings', {})
+    # --------------------------------------------------------
+    # Search
+    # --------------------------------------------------------
 
     def search_units(self, query):
-        """Search for units matching query"""
-        query_lower = query.lower()
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        units = data_section.get('Unit', {})
-
-        matches = []
-        for unit_name, unit_data in units.items():
-            if query_lower in unit_name.lower():
-                matches.append({'name': unit_name, **unit_data})
-
-        return matches
+        q = query.lower()
+        results = []
+        for name, uid in self._unit_name_to_id.items():
+            if q in name.lower():
+                raw = self._data.get("data", {}).get("Unit", {}).get(uid, {})
+                results.append({"name": name, **raw})
+        return results
 
     def search_techs(self, query):
-        """Search for technologies matching query"""
-        query_lower = query.lower()
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        techs = data_section.get('Tech', {})
-
-        matches = []
-        for tech_name, tech_data in techs.items():
-            if query_lower in tech_name.lower():
-                matches.append({'name': tech_name, **tech_data})
-
-        return matches
+        q = query.lower()
+        results = []
+        for name, tid in self._tech_name_to_id.items():
+            if q in name.lower():
+                raw = self._data.get("data", {}).get("Tech", {}).get(tid, {})
+                results.append({"name": name, **raw})
+        return results
 
     def search_buildings(self, query):
-        """Search for buildings matching query"""
-        query_lower = query.lower()
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        buildings = data_section.get('Building', {})
+        q = query.lower()
+        results = []
+        for name, bid in self._building_name_to_id.items():
+            if q in name.lower():
+                raw = self._data.get("data", {}).get("Building", {}).get(bid, {})
+                results.append({"name": name, **raw})
+        return results
 
-        matches = []
-        for building_name, building_data in buildings.items():
-            if query_lower in building_name.lower():
-                matches.append({'name': building_name, **building_data})
-
-        return matches
+    # --------------------------------------------------------
+    # Info
+    # --------------------------------------------------------
 
     def get_data_info(self):
-        """Get information about loaded data"""
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-
         info = {
-            'civs_count': len(main_data.get('civs', {})),
-            'units_count': len(data_section.get('Unit', {})),
-            'techs_count': len(data_section.get('Tech', {})),
-            'buildings_count': len(data_section.get('Building', {})),
-            'ages_count': len(main_data.get('age_names', {})),
-            'loaded_civ_trees': len(self.civ_trees)
+            "civs_count": len(self.get_civ_names()),
+            "units_count": len(self._unit_name_to_id),
+            "techs_count": len(self._tech_name_to_id),
+            "buildings_count": len(self._building_name_to_id),
         }
-
-        # Get cache age
-        data_file = self._get_cache_file('data.json')
-        if data_file.exists():
-            file_time = datetime.fromtimestamp(data_file.stat().st_mtime)
-            info['last_update'] = file_time.strftime('%Y-%m-%d %H:%M:%S')
-
+        cache_file = self._cache_path("data.json")
+        if cache_file.exists():
+            t = datetime.fromtimestamp(cache_file.stat().st_mtime)
+            info["last_update"] = t.strftime("%Y-%m-%d %H:%M:%S")
         return info
-
-
-if __name__ == '__main__':
-    # Test the data manager
-    dm = DataManager()
-
-    print("\n=== Data Info ===")
-    info = dm.get_data_info()
-    for key, value in info.items():
-        print(f"{key}: {value}")
-
-    print("\n=== All Civilizations ===")
-    civs = dm.get_civ_names()
-    print(f"Found {len(civs)} civilizations")
-    print(civs[:10], "...")
-
-    print("\n=== Test: Load Britons Tech Tree ===")
-    if 'Britons' in civs:
-        tree = dm.load_civ_tree('Britons')
-        if tree:
-            print(f"Loaded Britons tech tree with keys: {list(tree.keys())[:5]}")
-
-    print("\n=== Sample Units ===")
-    units = dm.get_unit_names()
-    print(f"Found {len(units)} units")
-    print(units[:10])
-
-    print("\n=== Sample Technologies ===")
-    techs = dm.get_tech_names()
-    print(f"Found {len(techs)} technologies")
-    print(techs[:10])
-
-    print("\n=== Sample Buildings ===")
-    buildings = dm.get_building_names()
-    print(f"Found {len(buildings)} buildings")
-    print(buildings[:10])
-
-    print("\n=== Search Test ===")
-    archer_units = dm.search_units('archer')
-    print(f"Units matching 'archer': {[u['name'] for u in archer_units[:5]]}")

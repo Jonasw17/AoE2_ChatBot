@@ -1,0 +1,19 @@
+# Discord Bot
+discord.py>=2.3.0
+
+# Web Requests (for downloading JSON from GitHub)
+requests>=2.31.0
+
+# Fuzzy Matching
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0
+
+# LLM Integration (optional)
+groq>=0.4.0
+openai>=1.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Async HTTP (for Discord)
+aiohttp>=3.9.0

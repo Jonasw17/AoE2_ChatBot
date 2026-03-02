@@ -24,9 +24,9 @@ class DataManager:
 
         # Data file paths
         self.files = {
-            'main': 'data.json',       # Contains: civ_names, tech_tree_strings, age_names, building_names, unit_names, tech_names
-            'strings': 'strings.json', # Contains: localized text for civs, units, techs (bonus descriptions etc.)
+            'main': 'data.json', # Contains: civ_names, tech_tree_strings, age_names, building_names, unit_names, tech_names
         }
+        self.strings_url = f"{self.base_url}/locales/en/strings.json" # Contains: localized text for civs, units, techs (bonus descriptions etc.)
 
         # Trees directory for per-civ tech trees
         self.trees_url = f"{self.base_url}/trees"
@@ -102,21 +102,48 @@ class DataManager:
         """Load all data files"""
         print("Loading AoE2 data...")
 
+
         for key, filename in self.files.items():
             data = self._load_file(key, filename)
             if data:
                 self.data[key] = data
             else:
                 print(f"Warning: Failed to load {filename}")
+
                 self.data[key] = {}
 
-        print("Data loading complete!")
 
-        # After loading main data.json, attempt to download all per-civ tech trees so commands don't trigger on-demand downloads
+        # Load strings.json from its correct path (locales/en/)
+        strings_data = self._load_strings()
+        if strings_data:
+            self.data['strings'] = strings_data
+
+    def _load_strings(self):
+        """Load strings.json from the correct locales/en/ path"""
+        cache_file = self.data_dir / 'strings.json'
+
+        if self._is_cache_valid(cache_file):
+            print("Loading strings.json from cache...")
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+        url = f"{self.base_url}/locales/en/strings.json"
         try:
-            self._download_all_trees()
-        except Exception as e:
-            print(f"Warning: could not download all civ trees on startup: {e}")
+            print("Downloading strings.json...")
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            print("Downloaded strings.json successfully")
+            return data
+        except requests.RequestException as e:
+            print(f"Error downloading strings.json: {e}")
+            if cache_file.exists():
+                print("Using expired cache for strings.json")
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return None
 
     def force_update(self):
         """Force download of fresh data"""
@@ -684,6 +711,13 @@ class DataManager:
 
         # You can also return the list of discovered candidates if needed
         return remote_candidates
+
+
+    def _download_strings(self):
+        """Download strings.json from GitHub and cache it"""
+        filename = self.files['strings']
+        url = f"{self.base_url}/{filename}"
+        return self._download_file(filename, url)
 
 if __name__ == '__main__':
     # Test the data manager

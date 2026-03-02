@@ -25,7 +25,7 @@ class DataManager:
         # Data file paths
         self.files = {
             'main': 'data.json',       # Contains: civ_names, tech_tree_strings, age_names, building_names, unit_names, tech_names
-            'strings': 'strings.json', # Contains: localized text for civs, units, techs (bonus descriptions etc.)
+            'strings': '/locales/en/strings.json', # Contains: localized text for civs, units, techs (bonus descriptions etc.)
         }
 
         # Trees directory for per-civ tech trees

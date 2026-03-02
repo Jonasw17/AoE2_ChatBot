@@ -82,7 +82,7 @@ Respond with only the JSON object, no other text."""
                             "num_predict": 200
                         }
                     },
-                    timeout=30
+                    timeout=120
                 )
                 response.raise_for_status()
                 result = response.json()['response']

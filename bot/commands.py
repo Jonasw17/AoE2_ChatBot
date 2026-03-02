@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manager.retriever import DataRetriever
-
+from llm.llm_handler import LLMHandler
 
 def _cost_str(cost):
     """Format {'Food': 60, 'Gold': 75} into '60 Food, 75 Gold'."""
@@ -34,6 +34,7 @@ class AoE2Commands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.retriever = DataRetriever()
+        self.llm_handler = LLMHandler()  # Add this line
 
     # --------------------------------------------------------
     # ?civ
@@ -335,6 +336,159 @@ class AoE2Commands(commands.Cog):
         except Exception as e:
             await ctx.send(f"Error updating data: {e}")
 
+    @commands.command(name="aoe2")
+    async def ask_aoe2(self, ctx, *, question: str):
+        """Ask any AoE2 question in natural language. Usage: ?aoe2 What are the Britons bonuses?"""
+        try:
+            msg = await ctx.send("Thinking...")
+
+            question_lower = question.lower()
+            response = None
+
+            # Check for civilization queries
+            if any(word in question_lower for word in ['civ', 'civilization', 'bonus', 'bonuses', 'team bonus']):
+                all_civs = self.retriever.get_all_civs()
+                for civ in all_civs:
+                    if civ.lower() in question_lower:
+                        civ_info = self.retriever.get_civ_info(civ)
+                        if civ_info:
+                            response = f"**{civ}**\n\n"
+
+                            bonuses = civ_info.get('bonuses', [])
+                            if bonuses:
+                                response += "**Civilization Bonuses:**\n"
+                                for bonus in bonuses:
+                                    response += f"- {bonus}\n"
+
+                            team_bonus = civ_info.get('team_bonus', '')
+                            if team_bonus:
+                                response += f"\n**Team Bonus:** {team_bonus}\n"
+
+                            unique_units = civ_info.get('unique_units', [])
+                            if unique_units:
+                                response += f"\n**Unique Units:** {', '.join(unique_units)}\n"
+
+                            unique_techs = civ_info.get('unique_techs', [])
+                            if unique_techs:
+                                response += f"\n**Unique Techs:** {', '.join(unique_techs)}"
+                        break
+
+            # Check for unit queries
+            elif any(word in question_lower for word in ['unit', 'stats', 'cost', 'hp', 'health', 'attack', 'armor']):
+                all_units = self.retriever.get_all_units()
+                for unit in all_units:
+                    if unit.lower() in question_lower:
+                        unit_info = self.retriever.get_unit_info(unit)
+                        if unit_info:
+                            response = f"**{unit}**\n\n"
+
+                            if 'Cost' in unit_info:
+                                response += f"**Cost:** {_cost_str(unit_info['Cost'])}\n"
+                            if 'HP' in unit_info:
+                                response += f"**HP:** {unit_info['HP']}\n"
+                            if 'Attack' in unit_info:
+                                response += f"**Attack:** {unit_info['Attack']}\n"
+                            if 'Armours' in unit_info or 'MeleeArmor' in unit_info:
+                                if 'MeleeArmor' in unit_info and 'PierceArmor' in unit_info:
+                                    response += f"**Armor:** {unit_info['MeleeArmor']}/{unit_info['PierceArmor']} (Melee/Pierce)\n"
+                            if 'Speed' in unit_info:
+                                response += f"**Speed:** {unit_info['Speed']}\n"
+                            if 'Range' in unit_info and unit_info['Range'] > 0:
+                                response += f"**Range:** {unit_info['Range']}\n"
+
+                            response += f"\nUse `?unit {unit}` for detailed stats"
+                        break
+
+            # Check for comparison queries
+            elif any(word in question_lower for word in ['compare', 'vs', 'versus', 'difference']):
+                all_civs = self.retriever.get_all_civs()
+                found_civs = []
+                for civ in all_civs:
+                    if civ.lower() in question_lower:
+                        found_civs.append(civ)
+
+                if len(found_civs) >= 2:
+                    comparison = self.retriever.compare_civs(found_civs[0], found_civs[1])
+                    if comparison:
+                        civ1 = comparison['civ1']
+                        civ2 = comparison['civ2']
+
+                        response = f"**{civ1['name']} vs {civ2['name']}**\n\n"
+                        response += f"**{civ1['name']} Bonuses:**\n"
+                        for bonus in civ1.get('bonuses', [])[:5]:
+                            response += f"- {bonus}\n"
+
+                        response += f"\n**{civ2['name']} Bonuses:**\n"
+                        for bonus in civ2.get('bonuses', [])[:5]:
+                            response += f"- {bonus}\n"
+
+                        response += f"\nUse `?compare {found_civs[0]} {found_civs[1]}` for full comparison"
+
+            # Counter queries - explain we don't have this yet
+            elif 'counter' in question_lower:
+                response = (
+                    "Counter information isn't available yet in natural language queries.\n\n"
+                    "Try using the specific commands:\n"
+                    "- `?unit <name>` - See unit stats\n"
+                    "- `?civ <name>` - See civ bonuses\n"
+                    "- `?civs` - List all civilizations\n"
+                    "- `?units` - List all units"
+                )
+
+            # Generic search - try to find any civ or unit mentioned
+            else:
+                all_civs = self.retriever.get_all_civs()
+                all_units = self.retriever.get_all_units()
+
+                for civ in all_civs:
+                    if civ.lower() in question_lower:
+                        civ_info = self.retriever.get_civ_info(civ)
+                        if civ_info:
+                            response = f"**{civ}**\n\n"
+                            bonuses = civ_info.get('bonuses', [])[:5]
+                            if bonuses:
+                                response += "**Bonuses:**\n"
+                                for bonus in bonuses:
+                                    response += f"- {bonus}\n"
+                            response += f"\nUse `?civ {civ}` for complete info"
+                        break
+
+                if not response:
+                    for unit in all_units:
+                        if unit.lower() in question_lower:
+                            unit_info = self.retriever.get_unit_info(unit)
+                            if unit_info:
+                                response = f"**{unit}**\n\n"
+                                if 'Cost' in unit_info:
+                                    response += f"Cost: {_cost_str(unit_info['Cost'])}\n"
+                                if 'HP' in unit_info:
+                                    response += f"HP: {unit_info['HP']}\n"
+                                response += f"\nUse `?unit {unit}` for full stats"
+                            break
+
+            # Send response
+            await msg.delete()
+            if response:
+                # Split if too long
+                if len(response) > 1900:
+                    chunks = [response[i:i+1900] for i in range(0, len(response), 1900)]
+                    for chunk in chunks:
+                        await ctx.send(chunk)
+                else:
+                    await ctx.send(response)
+            else:
+                await ctx.send(
+                    "I couldn't understand that question. Try:\n"
+                    "- `?civ britons` - Civilization info\n"
+                    "- `?unit knight` - Unit stats\n"
+                    "- `?compare britons franks` - Compare civs\n"
+                    "- `?civs` - List all civilizations\n"
+                    "- `?units` - List all units"
+                )
+
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+            print(f"Error in ask_aoe2: {e}")
 
 async def setup(bot):
     await bot.add_cog(AoE2Commands(bot))

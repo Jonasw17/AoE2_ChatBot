@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 """
-Discord bot commands for AoE2 information
+Discord bot commands for AoE2 information - Fixed Formatting
 """
 import discord
 from discord.ext import commands
@@ -13,19 +12,65 @@ from manager.retriever import DataRetriever
 from llm.llm_handler import LLMHandler
 
 def _cost_str(cost):
-    """Format {'Food': 60, 'Gold': 75} into '60 Food, 75 Gold'."""
+    """Format {'Food': 60, 'Gold': 75} into '60F, 75G'."""
     if isinstance(cost, dict):
-        return ", ".join(f"{v} {k}" for k, v in cost.items() if v)
+        parts = []
+        if cost.get('Food'):
+            parts.append(f"{cost['Food']}F")
+        if cost.get('Wood'):
+            parts.append(f"{cost['Wood']}W")
+        if cost.get('Gold'):
+            parts.append(f"{cost['Gold']}G")
+        if cost.get('Stone'):
+            parts.append(f"{cost['Stone']}S")
+        return ", ".join(parts) if parts else "0"
     return str(cost)
 
 
-def _armor_str(armor):
-    """Format {'Melee': 2, 'Pierce': 3} into '2/3 (Melee/Pierce)'."""
-    if isinstance(armor, dict):
-        melee = armor.get("Melee", armor.get("melee", 0))
-        pierce = armor.get("Pierce", armor.get("pierce", 0))
-        return f"{melee}/{pierce} (Melee/Pierce)"
-    return str(armor)
+def _armor_str(armor_dict):
+    """Format armor dictionary into readable string."""
+    if not isinstance(armor_dict, dict):
+        return str(armor_dict)
+
+    melee = armor_dict.get('Melee', 0)
+    pierce = armor_dict.get('Pierce', 0)
+
+    # Start with base armor
+    result = f"{melee}/{pierce}"
+
+    # Add bonus armor classes if any
+    bonus_armors = []
+    for key, value in armor_dict.items():
+        if key not in ['Melee', 'Pierce'] and value > 0:
+            bonus_armors.append(f"+{value} {key}")
+
+    if bonus_armors:
+        result += " (" + ", ".join(bonus_armors) + ")"
+
+    return result
+
+
+def _attack_str(attacks_dict, base_attack=None):
+    """Format attack dictionary into readable string."""
+    if not isinstance(attacks_dict, dict):
+        if base_attack:
+            return str(base_attack)
+        return str(attacks_dict)
+
+    parts = []
+
+    # Base attack first
+    if base_attack:
+        parts.append(str(base_attack))
+    elif 'Base' in attacks_dict:
+        parts.append(str(attacks_dict['Base']))
+
+    # Add bonus attacks
+    for key, value in attacks_dict.items():
+        if key != 'Base' and value > 0:
+            parts.append(f"+{value} {key}")
+
+    return ", ".join(parts) if parts else "0"
 
 
 class AoE2Commands(commands.Cog):
@@ -34,7 +79,7 @@ class AoE2Commands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.retriever = DataRetriever()
-        self.llm_handler = LLMHandler()  # Add this line
+        self.llm_handler = LLMHandler()
 
     # --------------------------------------------------------
     # ?civ
@@ -54,17 +99,18 @@ class AoE2Commands(commands.Cog):
 
             embed = discord.Embed(title=civ["name"], color=discord.Color.gold())
 
+            civ_type = civ.get('civ_type', '')
+            if civ_type:
+                embed.description = civ_type
+
             bonuses = civ.get("bonuses", [])
             if bonuses:
+                bonus_text = "\n".join(f"• {b}" for b in bonuses)
+                if len(bonus_text) > 1024:
+                    bonus_text = bonus_text[:1020] + "..."
                 embed.add_field(
                     name="Civilization Bonuses",
-                    value="\n".join(f"- {b}" for b in bonuses),
-                    inline=False,
-                )
-            else:
-                embed.add_field(
-                    name="Civilization Bonuses",
-                    value="No bonus data found. Check console and run ?debugciv " + civ["name"],
+                    value=bonus_text,
                     inline=False,
                 )
 
@@ -80,30 +126,12 @@ class AoE2Commands(commands.Cog):
             if ut:
                 embed.add_field(name="Unique Techs", value=", ".join(ut), inline=True)
 
-            embed.set_footer(text="Data: aoe2techtree.net | Use ?compare <civ1> <civ2> to compare")
+            embed.set_footer(text="Use ?compare <civ1> <civ2> to compare")
             await ctx.send(embed=embed)
 
         except Exception as e:
             await ctx.send(f"Error retrieving civilization info: {e}")
             print(f"Error in civ_info: {e}")
-
-    # --------------------------------------------------------
-    # ?debugciv  -- dumps raw civ data so we can see the actual keys
-    # --------------------------------------------------------
-
-    @commands.command(name="debugciv")
-    async def debug_civ(self, ctx, *, civ_name: str):
-        """Dump raw civ data for debugging.  Usage: ?debugciv Britons"""
-        try:
-            raw = self.retriever.data_manager.get_civ_data(civ_name)
-            if not raw:
-                await ctx.send(f"Could not find civ: {civ_name}")
-                return
-            keys = list(raw.keys())
-            sample = str(raw)[:800]
-            await ctx.send(f"Keys: {keys}\n\nSample:\n```\n{sample}\n```")
-        except Exception as e:
-            await ctx.send(f"Error: {e}")
 
     # --------------------------------------------------------
     # ?civs
@@ -126,19 +154,19 @@ class AoE2Commands(commands.Cog):
                     description=", ".join(chunk),
                     color=discord.Color.blue(),
                 )
-                embed.set_footer(text=f"Total: {len(civs)} civilizations | Use ?civ <n> for details")
+                embed.set_footer(text=f"Total: {len(civs)} civilizations | Use ?civ <name> for details")
                 await ctx.send(embed=embed)
 
         except Exception as e:
             await ctx.send(f"Error retrieving civilizations: {e}")
 
     # --------------------------------------------------------
-    # ?unit
+    # ?unit - Enhanced with proper formatting
     # --------------------------------------------------------
 
     @commands.command(name="unit")
     async def unit_info(self, ctx, *, unit_name: str):
-        """Get unit stats.  Usage: ?unit Knight"""
+        """Get detailed unit stats. Usage: ?unit Archer"""
         try:
             unit = self.retriever.get_unit_info(unit_name)
             if not unit:
@@ -148,49 +176,162 @@ class AoE2Commands(commands.Cog):
                 )
                 return
 
-            embed = discord.Embed(title=unit["name"], color=discord.Color.red())
+            embed = discord.Embed(
+                title=unit["name"],
+                color=discord.Color.red()
+            )
 
+            # Build description line: prefer the game's own flavour text.
+            # Fall back to the armor-class classification if it is not available.
+            desc_info    = unit.get('Description_Info', {})
+            counter_info = unit.get('Counter_Info', {})
+            classification = counter_info.get('classification', '')
+
+            flavour = desc_info.get('description', '')
+            if flavour:
+                embed.description = f"*{flavour}*"
+            elif classification and classification != 'Other':
+                embed.description = f"*{classification} Unit*"
+
+            # === STATS SECTION ===
+            stats_lines = []
+
+            # HP
+            hp = unit.get("HP")
+            if hp is not None:
+                stats_lines.append(f"**HP:** {hp}")
+
+            # Attack (with bonuses)
+            base_attack = unit.get("Attack")
+            attacks_parsed = unit.get("Attacks_Parsed", {})
+            if base_attack is not None or attacks_parsed:
+                attack_str = _attack_str(attacks_parsed, base_attack)
+                stats_lines.append(f"**Attack:** {attack_str}")
+
+            # Armor (with bonuses)
+            armor_parsed = unit.get("Armor_Parsed", {})
+            if armor_parsed:
+                armor_str = _armor_str(armor_parsed)
+                stats_lines.append(f"**Armor:** {armor_str}")
+
+            # Range
+            rng = unit.get("Range")
+            if rng is not None and rng > 0:
+                stats_lines.append(f"**Range:** {rng}")
+
+            # Line of Sight
+            los = unit.get("LineOfSight") or unit.get("LOS")
+            if los is not None:
+                stats_lines.append(f"**Line of Sight:** {los}")
+
+            # Speed
+            speed = unit.get("Speed")
+            if speed is not None:
+                stats_lines.append(f"**Speed:** {speed}")
+
+            # Attack Rate / Reload Time
+            rate = unit.get("ReloadTime") or unit.get("AttackRate") or unit.get("Rate of Fire")
+            if rate is not None:
+                stats_lines.append(f"**Attack Rate:** {rate}s")
+
+            # Training Time
+            train_time = unit.get("TrainTime")
+            if train_time is not None:
+                stats_lines.append(f"**Train Time:** {train_time}s")
+
+            if stats_lines:
+                embed.add_field(
+                    name="Stats",
+                    value="\n".join(stats_lines),
+                    inline=False
+                )
+
+            # === COST ===
             cost = unit.get("Cost")
             if cost:
                 embed.add_field(name="Cost", value=_cost_str(cost), inline=True)
 
-            hp = unit.get("HP")
-            if hp is not None:
-                embed.add_field(name="HP", value=str(hp), inline=True)
+            # === COUNTERS SECTION ===
+            # Prefer description-based data (straight from the game text).
+            # Fall back to the armor-class heuristic when description data is absent.
+            desc_info = unit.get('Description_Info', {})
+            counter_info = unit.get('Counter_Info', {})
 
-            attack = unit.get("Attack")
-            if attack is not None:
-                embed.add_field(name="Attack", value=str(attack), inline=True)
+            # Get strong vs and weak vs from both sources, prefer description
+            strong_vs = desc_info.get('strong_vs', [])
+            weak_vs = desc_info.get('weak_vs', [])
 
-            armor = unit.get("Armor")
-            if armor is not None:
-                embed.add_field(name="Armor", value=_armor_str(armor), inline=True)
+            # If description doesn't have counter info, use heuristic
+            if not strong_vs:
+                strong_vs = counter_info.get('strong_against', [])
+            if not weak_vs:
+                weak_vs = counter_info.get('countered_by', [])
 
-            speed = unit.get("Speed")
-            if speed is not None:
-                embed.add_field(name="Speed", value=str(speed), inline=True)
+            # Bonus damage from armor-class parsing (separate from "strong vs")
+            bonus_dmg = counter_info.get('bonus_damage_vs', [])
 
-            rng = unit.get("Range")
-            if rng is not None:
-                embed.add_field(name="Range", value=str(rng), inline=True)
+            # Display strengths (either from description or bonus damage)
+            if strong_vs:
+                embed.add_field(
+                    name="Strong Against",
+                    value=", ".join(strong_vs),
+                    inline=False
+                )
+            elif bonus_dmg:
+                # Only show bonus damage if we don't have description-based strengths
+                embed.add_field(
+                    name="Bonus Damage",
+                    value=", ".join(bonus_dmg),
+                    inline=False
+                )
 
-            rate = unit.get("AttackRate") or unit.get("Rate of Fire")
-            if rate is not None:
-                embed.add_field(name="Attack Rate", value=str(rate), inline=True)
+            # Display weaknesses
+            if weak_vs:
+                embed.add_field(
+                    name="Weak Against",
+                    value=", ".join(weak_vs),
+                    inline=False
+                )
 
-            los = unit.get("LineOfSight")
-            if los is not None:
-                embed.add_field(name="Line of Sight", value=str(los), inline=True)
+            # === ATTACK BREAKDOWN (if complex) ===
+            if attacks_parsed and len(attacks_parsed) > 2:
+                attack_details = []
+                for atk_type, dmg in attacks_parsed.items():
+                    if dmg > 0:
+                        attack_details.append(f"{atk_type}: {dmg}")
+
+                if attack_details:
+                    embed.add_field(
+                        name="Attack Breakdown",
+                        value="\n".join(attack_details),
+                        inline=True
+                    )
+
+            # === ARMOR BREAKDOWN (if complex) ===
+            if armor_parsed and len(armor_parsed) > 2:
+                armor_details = []
+                for armor_type, value in armor_parsed.items():
+                    if value > 0:
+                        armor_details.append(f"{armor_type}: {value}")
+
+                if armor_details:
+                    embed.add_field(
+                        name="Armor Breakdown",
+                        value="\n".join(armor_details),
+                        inline=True
+                    )
 
             if not embed.fields:
                 embed.description = "Detailed stats not available for this unit."
 
-            embed.set_footer(text="Use ?units to see all units")
+            embed.set_footer(text="Data from aoe2techtree.net | Use ?units to see all units")
             await ctx.send(embed=embed)
 
         except Exception as e:
             await ctx.send(f"Error retrieving unit info: {e}")
             print(f"Error in unit_info: {e}")
+            import traceback
+            traceback.print_exc()
 
     # --------------------------------------------------------
     # ?units
@@ -213,11 +354,87 @@ class AoE2Commands(commands.Cog):
                     description=", ".join(chunk),
                     color=discord.Color.green(),
                 )
-                embed.set_footer(text=f"Total: {len(units)} units | Use ?unit <n> for details")
+                embed.set_footer(text=f"Total: {len(units)} units | Use ?unit <name> for details")
                 await ctx.send(embed=embed)
 
         except Exception as e:
             await ctx.send(f"Error retrieving units: {e}")
+
+    # --------------------------------------------------------
+    # ?counter - Show what counters a unit
+    # --------------------------------------------------------
+
+    @commands.command(name="counter")
+    async def counter_info(self, ctx, *, unit_name: str):
+        """Find what counters a specific unit.  Usage: ?counter Knight"""
+        try:
+            unit = self.retriever.get_unit_info(unit_name)
+            if not unit:
+                await ctx.send(
+                    f"Could not find unit: {unit_name}\n"
+                    f"Use `?units` to browse all units."
+                )
+                return
+
+            desc_info    = unit.get('Description_Info', {})
+            counter_info = unit.get('Counter_Info', {})
+
+            embed = discord.Embed(
+                title=f"Counters for {unit['name']}",
+                color=discord.Color.orange()
+            )
+
+            classification = counter_info.get('classification', 'Other')
+            if classification != 'Other':
+                embed.description = f"*{classification} Unit*"
+
+            # Prefer description-based counters (from game text)
+            weak_vs = desc_info.get('weak_vs', [])
+            strong_vs = desc_info.get('strong_vs', [])
+
+            # If description doesn't have counter info, use heuristic
+            if not weak_vs:
+                weak_vs = counter_info.get('countered_by', [])
+            if not strong_vs:
+                strong_vs = counter_info.get('strong_against', [])
+
+            bonus_dmg = counter_info.get('bonus_damage_vs', [])
+
+            # Countered By
+            if weak_vs:
+                embed.add_field(
+                    name="Countered By",
+                    value=", ".join(weak_vs),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="Countered By",
+                    value="No counter data available",
+                    inline=False
+                )
+
+            # Effective Against
+            if strong_vs:
+                embed.add_field(
+                    name="Effective Against",
+                    value=", ".join(strong_vs),
+                    inline=False
+                )
+            elif bonus_dmg:
+                # Only show bonus damage if we don't have description-based strengths
+                embed.add_field(
+                    name="Bonus Damage",
+                    value=", ".join(bonus_dmg),
+                    inline=False
+                )
+
+            embed.set_footer(text="Use ?unit for full stats | Counter data from game descriptions")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"Error retrieving counter info: {e}")
+            print(f"Error in counter_info: {e}")
 
     # --------------------------------------------------------
     # ?tech
@@ -229,24 +446,194 @@ class AoE2Commands(commands.Cog):
         try:
             tech = self.retriever.get_tech_info(tech_name)
             if not tech:
-                await ctx.send(f"Could not find technology: {tech_name}")
+                await ctx.send(
+                    f"Could not find technology: **{tech_name}**\n"
+                    f"Use `?techs` to browse all technologies."
+                )
                 return
 
             embed = discord.Embed(title=tech["name"], color=discord.Color.purple())
 
+            # Description from strings.json
+            desc_info = tech.get('Description_Info', {})
+            flavour = desc_info.get('description', '')
+            if flavour:
+                embed.description = f"*{flavour}*"
+
+            # Effect / what it upgrades (from the Upgrades: line in description)
+            effect = desc_info.get('effect', '')
+            if effect:
+                # Trim long upgrade lists to keep the embed clean
+                if len(effect) > 200:
+                    effect = effect[:197] + '...'
+                embed.add_field(name="Effect", value=effect, inline=False)
+
+            # Cost
             cost = tech.get("Cost")
             if cost:
                 embed.add_field(name="Cost", value=_cost_str(cost), inline=True)
 
+            # Research time
             research_time = tech.get("ResearchTime") or tech.get("ResearchDuration")
             if research_time is not None:
                 embed.add_field(name="Research Time", value=f"{research_time}s", inline=True)
+
+            # Age / where it is researched
+            age = tech.get("Age") or tech.get("RequiredAge")
+            if age:
+                age_names = {1: "Dark Age", 2: "Feudal Age", 3: "Castle Age", 4: "Imperial Age"}
+                embed.add_field(name="Age", value=age_names.get(age, str(age)), inline=True)
 
             embed.set_footer(text="Use ?techs to browse all technologies")
             await ctx.send(embed=embed)
 
         except Exception as e:
             await ctx.send(f"Error retrieving technology info: {e}")
+            print(f"Error in tech_info: {e}")
+
+    # --------------------------------------------------------
+    # ?techs
+    # --------------------------------------------------------
+
+    @commands.command(name="techs")
+    async def list_techs(self, ctx):
+        """List all technologies.  Usage: ?techs"""
+        try:
+            techs = self.retriever.get_all_techs()
+            if not techs:
+                await ctx.send("No technologies found.")
+                return
+
+            chunk_size = 30
+            chunks = [techs[i:i + chunk_size] for i in range(0, len(techs), chunk_size)]
+            for i, chunk in enumerate(chunks):
+                embed = discord.Embed(
+                    title=f"Age of Empires 2 Technologies ({i + 1}/{len(chunks)})",
+                    description=", ".join(chunk),
+                    color=discord.Color.purple(),
+                )
+                embed.set_footer(text=f"Total: {len(techs)} technologies | Use ?tech <name> for details")
+                await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"Error retrieving technologies: {e}")
+
+    # --------------------------------------------------------
+    # ?building
+    # --------------------------------------------------------
+
+    @commands.command(name="building")
+    async def building_info(self, ctx, *, building_name: str):
+        """Get information about a building.  Usage: ?building Castle"""
+        try:
+            building = self.retriever.get_building_info(building_name)
+            if not building:
+                await ctx.send(
+                    f"Could not find building: **{building_name}**\n"
+                    f"Use `?buildings` to browse all buildings."
+                )
+                return
+
+            embed = discord.Embed(
+                title=building["name"],
+                color=discord.Color.dark_gold()
+            )
+
+            # Description from strings.json
+            desc_info = building.get('Description_Info', {})
+            flavour = desc_info.get('description', '')
+            if flavour:
+                embed.description = f"*{flavour}*"
+
+            # Stats
+            stats_lines = []
+
+            hp = building.get("HP")
+            if hp is not None:
+                stats_lines.append(f"**HP:** {hp}")
+
+            armor_parsed = building.get("Armor_Parsed", {})
+            if armor_parsed:
+                melee  = armor_parsed.get('Melee', 0)
+                pierce = armor_parsed.get('Pierce', 0)
+                stats_lines.append(f"**Armor:** {melee}/{pierce} (melee/pierce)")
+
+            los = building.get("LineOfSight") or building.get("LOS")
+            if los is not None:
+                stats_lines.append(f"**Line of Sight:** {los}")
+
+            garrison = building.get("GarrisonCapacity") or building.get("Garrison")
+            if garrison:
+                stats_lines.append(f"**Garrison:** {garrison}")
+
+            population = building.get("Population") or building.get("PopulationCapacity")
+            if population:
+                stats_lines.append(f"**Population:** +{population}")
+
+            if stats_lines:
+                embed.add_field(name="Stats", value="\n".join(stats_lines), inline=False)
+
+            # Cost
+            cost = building.get("Cost")
+            if cost:
+                embed.add_field(name="Cost", value=_cost_str(cost), inline=True)
+
+            # Build time
+            build_time = building.get("TrainTime") or building.get("BuildTime")
+            if build_time is not None:
+                embed.add_field(name="Build Time", value=f"{build_time}s", inline=True)
+
+            # Attack (towers etc.)
+            attack = building.get("Attack")
+            if attack:
+                rng = building.get("Range")
+                atk_str = str(attack)
+                if rng:
+                    atk_str += f" (range {rng})"
+                embed.add_field(name="Attack", value=atk_str, inline=True)
+
+            # Strong / weak from description
+            strong_vs = desc_info.get('strong_vs', [])
+            weak_vs   = desc_info.get('weak_vs', [])
+
+            if strong_vs:
+                embed.add_field(name="Strong Against", value=", ".join(strong_vs), inline=False)
+            if weak_vs:
+                embed.add_field(name="Weak Against", value=", ".join(weak_vs), inline=False)
+
+            embed.set_footer(text="Use ?buildings to see all buildings")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"Error retrieving building info: {e}")
+            print(f"Error in building_info: {e}")
+
+    # --------------------------------------------------------
+    # ?buildings
+    # --------------------------------------------------------
+
+    @commands.command(name="buildings")
+    async def list_buildings(self, ctx):
+        """List all buildings.  Usage: ?buildings"""
+        try:
+            buildings = self.retriever.get_all_buildings()
+            if not buildings:
+                await ctx.send("No buildings found.")
+                return
+
+            chunk_size = 30
+            chunks = [buildings[i:i + chunk_size] for i in range(0, len(buildings), chunk_size)]
+            for i, chunk in enumerate(chunks):
+                embed = discord.Embed(
+                    title=f"Age of Empires 2 Buildings ({i + 1}/{len(chunks)})",
+                    description=", ".join(chunk),
+                    color=discord.Color.dark_gold(),
+                )
+                embed.set_footer(text=f"Total: {len(buildings)} buildings | Use ?building <name> for details")
+                await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"Error retrieving buildings: {e}")
 
     # --------------------------------------------------------
     # ?compare
@@ -271,22 +658,31 @@ class AoE2Commands(commands.Cog):
             )
 
             def bonus_block(civ_data):
+                lines = []
                 bonuses = civ_data.get("bonuses", [])
+                for b in bonuses[:5]:
+                    lines.append(f"• {b}")
+
                 tb = civ_data.get("team_bonus", "")
-                uu = civ_data.get("unique_units", [])
-                ut = civ_data.get("unique_techs", [])
-                lines = [f"- {b}" for b in bonuses[:5]]
                 if tb:
-                    lines.append(f"Team bonus: {tb}")
+                    lines.append(f"**Team:** {tb}")
+
+                uu = civ_data.get("unique_units", [])
                 if uu:
-                    lines.append(f"Unique units: {', '.join(uu)}")
+                    lines.append(f"**Units:** {', '.join(uu)}")
+
+                ut = civ_data.get("unique_techs", [])
                 if ut:
-                    lines.append(f"Unique techs: {', '.join(ut)}")
-                return "\n".join(lines) or "No data"
+                    lines.append(f"**Techs:** {', '.join(ut)}")
+
+                result = "\n".join(lines)
+                if len(result) > 1024:
+                    result = result[:1020] + "..."
+                return result or "No data"
 
             embed.add_field(name=c1["name"], value=bonus_block(c1), inline=True)
             embed.add_field(name=c2["name"], value=bonus_block(c2), inline=True)
-            embed.set_footer(text="Use ?civ <n> for full details")
+            embed.set_footer(text="Use ?civ <name> for full details")
             await ctx.send(embed=embed)
 
         except Exception as e:
@@ -315,7 +711,7 @@ class AoE2Commands(commands.Cog):
             await ctx.send(f"Error retrieving data info: {e}")
 
     # --------------------------------------------------------
-    # ?updatedata  (admin only)
+    # ?updatedata (admin only)
     # --------------------------------------------------------
 
     @commands.command(name="updatedata")
@@ -323,7 +719,7 @@ class AoE2Commands(commands.Cog):
     async def force_update(self, ctx):
         """Force refresh data from GitHub. Admin only.  Usage: ?updatedata"""
         try:
-            await ctx.send("Updating data from GitHub, please wait...")
+            await ctx.send("Checking for updates from GitHub, please wait...")
             self.retriever.force_data_update()
             info = self.retriever.get_data_info()
             await ctx.send(
@@ -336,159 +732,91 @@ class AoE2Commands(commands.Cog):
         except Exception as e:
             await ctx.send(f"Error updating data: {e}")
 
-    @commands.command(name="aoe2")
-    async def ask_aoe2(self, ctx, *, question: str):
-        """Ask any AoE2 question in natural language. Usage: ?aoe2 What are the Britons bonuses?"""
+    # --------------------------------------------------------
+    # ?checkupdates
+    # --------------------------------------------------------
+
+    @commands.command(name="checkupdates")
+    async def check_updates(self, ctx):
+        """Check if updates are available on GitHub.  Usage: ?checkupdates"""
         try:
-            msg = await ctx.send("Thinking...")
+            await ctx.send("Checking GitHub for updates...")
 
-            question_lower = question.lower()
-            response = None
+            has_updates = self.retriever.data_manager._check_for_updates()
 
-            # Check for civilization queries
-            if any(word in question_lower for word in ['civ', 'civilization', 'bonus', 'bonuses', 'team bonus']):
-                all_civs = self.retriever.get_all_civs()
-                for civ in all_civs:
-                    if civ.lower() in question_lower:
-                        civ_info = self.retriever.get_civ_info(civ)
-                        if civ_info:
-                            response = f"**{civ}**\n\n"
-
-                            bonuses = civ_info.get('bonuses', [])
-                            if bonuses:
-                                response += "**Civilization Bonuses:**\n"
-                                for bonus in bonuses:
-                                    response += f"- {bonus}\n"
-
-                            team_bonus = civ_info.get('team_bonus', '')
-                            if team_bonus:
-                                response += f"\n**Team Bonus:** {team_bonus}\n"
-
-                            unique_units = civ_info.get('unique_units', [])
-                            if unique_units:
-                                response += f"\n**Unique Units:** {', '.join(unique_units)}\n"
-
-                            unique_techs = civ_info.get('unique_techs', [])
-                            if unique_techs:
-                                response += f"\n**Unique Techs:** {', '.join(unique_techs)}"
-                        break
-
-            # Check for unit queries
-            elif any(word in question_lower for word in ['unit', 'stats', 'cost', 'hp', 'health', 'attack', 'armor']):
-                all_units = self.retriever.get_all_units()
-                for unit in all_units:
-                    if unit.lower() in question_lower:
-                        unit_info = self.retriever.get_unit_info(unit)
-                        if unit_info:
-                            response = f"**{unit}**\n\n"
-
-                            if 'Cost' in unit_info:
-                                response += f"**Cost:** {_cost_str(unit_info['Cost'])}\n"
-                            if 'HP' in unit_info:
-                                response += f"**HP:** {unit_info['HP']}\n"
-                            if 'Attack' in unit_info:
-                                response += f"**Attack:** {unit_info['Attack']}\n"
-                            if 'Armours' in unit_info or 'MeleeArmor' in unit_info:
-                                if 'MeleeArmor' in unit_info and 'PierceArmor' in unit_info:
-                                    response += f"**Armor:** {unit_info['MeleeArmor']}/{unit_info['PierceArmor']} (Melee/Pierce)\n"
-                            if 'Speed' in unit_info:
-                                response += f"**Speed:** {unit_info['Speed']}\n"
-                            if 'Range' in unit_info and unit_info['Range'] > 0:
-                                response += f"**Range:** {unit_info['Range']}\n"
-
-                            response += f"\nUse `?unit {unit}` for detailed stats"
-                        break
-
-            # Check for comparison queries
-            elif any(word in question_lower for word in ['compare', 'vs', 'versus', 'difference']):
-                all_civs = self.retriever.get_all_civs()
-                found_civs = []
-                for civ in all_civs:
-                    if civ.lower() in question_lower:
-                        found_civs.append(civ)
-
-                if len(found_civs) >= 2:
-                    comparison = self.retriever.compare_civs(found_civs[0], found_civs[1])
-                    if comparison:
-                        civ1 = comparison['civ1']
-                        civ2 = comparison['civ2']
-
-                        response = f"**{civ1['name']} vs {civ2['name']}**\n\n"
-                        response += f"**{civ1['name']} Bonuses:**\n"
-                        for bonus in civ1.get('bonuses', [])[:5]:
-                            response += f"- {bonus}\n"
-
-                        response += f"\n**{civ2['name']} Bonuses:**\n"
-                        for bonus in civ2.get('bonuses', [])[:5]:
-                            response += f"- {bonus}\n"
-
-                        response += f"\nUse `?compare {found_civs[0]} {found_civs[1]}` for full comparison"
-
-            # Counter queries - explain we don't have this yet
-            elif 'counter' in question_lower:
-                response = (
-                    "Counter information isn't available yet in natural language queries.\n\n"
-                    "Try using the specific commands:\n"
-                    "- `?unit <name>` - See unit stats\n"
-                    "- `?civ <name>` - See civ bonuses\n"
-                    "- `?civs` - List all civilizations\n"
-                    "- `?units` - List all units"
+            if has_updates:
+                await ctx.send(
+                    "Updates are available on GitHub!\n"
+                    "Use `?updatedata` (admin only) to download the latest data."
                 )
-
-            # Generic search - try to find any civ or unit mentioned
-            else:
-                all_civs = self.retriever.get_all_civs()
-                all_units = self.retriever.get_all_units()
-
-                for civ in all_civs:
-                    if civ.lower() in question_lower:
-                        civ_info = self.retriever.get_civ_info(civ)
-                        if civ_info:
-                            response = f"**{civ}**\n\n"
-                            bonuses = civ_info.get('bonuses', [])[:5]
-                            if bonuses:
-                                response += "**Bonuses:**\n"
-                                for bonus in bonuses:
-                                    response += f"- {bonus}\n"
-                            response += f"\nUse `?civ {civ}` for complete info"
-                        break
-
-                if not response:
-                    for unit in all_units:
-                        if unit.lower() in question_lower:
-                            unit_info = self.retriever.get_unit_info(unit)
-                            if unit_info:
-                                response = f"**{unit}**\n\n"
-                                if 'Cost' in unit_info:
-                                    response += f"Cost: {_cost_str(unit_info['Cost'])}\n"
-                                if 'HP' in unit_info:
-                                    response += f"HP: {unit_info['HP']}\n"
-                                response += f"\nUse `?unit {unit}` for full stats"
-                            break
-
-            # Send response
-            await msg.delete()
-            if response:
-                # Split if too long
-                if len(response) > 1900:
-                    chunks = [response[i:i+1900] for i in range(0, len(response), 1900)]
-                    for chunk in chunks:
-                        await ctx.send(chunk)
-                else:
-                    await ctx.send(response)
             else:
                 await ctx.send(
-                    "I couldn't understand that question. Try:\n"
-                    "- `?civ britons` - Civilization info\n"
-                    "- `?unit knight` - Unit stats\n"
-                    "- `?compare britons franks` - Compare civs\n"
-                    "- `?civs` - List all civilizations\n"
-                    "- `?units` - List all units"
+                    "Your data is up to date!\n"
+                    f"Last update: {self.retriever.get_data_info().get('last_update', 'Unknown')}"
                 )
-
         except Exception as e:
-            await ctx.send(f"Error: {e}")
-            print(f"Error in ask_aoe2: {e}")
+            await ctx.send(f"Error checking for updates: {e}")
+
+
+    # --------------------------------------------------------
+    # ?commands - AoE2 command summary
+    # --------------------------------------------------------
+
+    @commands.command(name="commands")
+    async def list_commands(self, ctx):
+        """Show all AoE2 bot commands.  Usage: ?commands"""
+        embed = discord.Embed(
+            title="AoE2 Bot Commands",
+            description="All commands use the `?` prefix.",
+            color=discord.Color.blurple()
+        )
+
+        embed.add_field(
+            name="Civilizations",
+            value=(
+                "`?civs` - List all civilizations\n"
+                "`?civ <name>` - Details & bonuses for a civ\n"
+                "`?compare <civ1> <civ2>` - Side-by-side comparison"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Units",
+            value=(
+                "`?units` - List all units\n"
+                "`?unit <name>` - Stats, cost, counters\n"
+                "`?counter <name>` - What counters this unit"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Technologies",
+            value=(
+                "`?techs` - List all technologies\n"
+                "`?tech <name>` - Cost, research time, effect"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Buildings",
+            value=(
+                "`?buildings` - List all buildings\n"
+                "`?building <name>` - HP, armor, cost, description"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="Data & Admin",
+            value=(
+                "`?datainfo` - Show data cache statistics\n"
+                "`?checkupdates` - Check GitHub for new data\n"
+                "`?updatedata` - Force refresh (admin only)"
+            ),
+            inline=False
+        )
+        embed.set_footer(text="Data from github.com/SiegeEngineers/aoe2techtree")
+        await ctx.send(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(AoE2Commands(bot))

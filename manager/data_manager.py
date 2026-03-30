@@ -1,58 +1,148 @@
+# -*- coding: utf-8 -*-
 import json
 import requests
-import difflib
 from datetime import datetime, timedelta
 from pathlib import Path
 
 class DataManager:
-    """Manage AoE2 data from GitHub JSON files"""
+    """Manage AoE2 data from GitHub JSON files with proper armor class handling"""
+
+    # Armor class mappings (from AoE2 game data)
+    ARMOR_CLASSES = {
+        0: "Unused",
+        1: "Infantry",
+        2: "Turtle Ships",
+        3: "Base Pierce",
+        4: "Base Melee",
+        5: "War Elephant",
+        8: "Cavalry",
+        11: "All Buildings",
+        13: "Stone Defense",
+        15: "Archers",
+        16: "Ships & Camels",
+        17: "Rams",
+        19: "Trees",
+        20: "Unique Units",
+        21: "Siege Weapons",
+        22: "Standard Buildings",
+        23: "Walls & Gates",
+        24: "Gunpowder Units",
+        25: "Boars",
+        26: "Monks",
+        27: "Castle",
+        28: "Spearmen",
+        29: "Cavalry Archers",
+        30: "Eagle Warriors",
+        31: "Camels",
+        32: "Fishing Ships",
+        34: "Mamelukes",
+        35: "Heroes",
+        36: "Hussite Wagons",
+    }
+
+    # Unit type classifications for counter logic
+    UNIT_CLASSIFICATIONS = {
+        'Infantry': {
+            'countered_by': ['Archer', 'Cataphract', 'Jaguar Warrior', 'Hand Cannoneer', 'Slinger', 'Scorpion'],
+            'strong_against': ['Villager', 'Monk', 'Siege'],
+        },
+        'Archer': {
+            'countered_by': ['Skirmisher', 'Eagle Warrior', 'Huskarl', 'Siege Ram', 'Mangonel'],
+            'strong_against': ['Infantry', 'Villager', 'Siege'],
+        },
+        'Cavalry': {
+            'countered_by': ['Spearman', 'Pikeman', 'Halberdier', 'Camel', 'Kamayuk', 'Genoese Crossbowman', 'Monk'],
+            'strong_against': ['Archer', 'Siege', 'Monk', 'Villager'],
+        },
+        'Cavalry Archer': {
+            'countered_by': ['Skirmisher', 'Eagle Warrior', 'Huskarl', 'Genoese Crossbowman', 'Camel'],
+            'strong_against': ['Infantry', 'Archer', 'Siege'],
+        },
+        'Siege': {
+            'countered_by': ['Mangonel', 'Bombard Cannon', 'Cavalry', 'Onager'],
+            'strong_against': ['Building', 'Infantry (grouped)'],
+        },
+        'Monk': {
+            'countered_by': ['Scout', 'Eagle Warrior', 'Knight', 'Huskarl'],
+            'strong_against': ['Slow units', 'Expensive units'],
+        },
+    }
 
     def __init__(self, data_dir="data", cache_hours=24):
-        """
-        Initialize the data manager
-
-        Args:
-            data_dir: Directory to store cached JSON files
-            cache_hours: Hours before re-downloading data
-        """
+        """Initialize the data manager"""
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         self.cache_hours = cache_hours
 
-        # GitHub raw content URLs
+        # GitHub URLs
         self.base_url = "https://raw.githubusercontent.com/SiegeEngineers/aoe2techtree/master/data"
+        self.api_base = "https://api.github.com/repos/SiegeEngineers/aoe2techtree/commits"
 
-        # Data file paths
-        self.files = {
-            'main': 'data.json', # Contains: civ_names, tech_tree_strings, age_names, building_names, unit_names, tech_names
-        }
-        self.strings_url = f"{self.base_url}/locales/en/strings.json" # Contains: localized text for civs, units, techs (bonus descriptions etc.)
-
-        # Trees directory for per-civ tech trees
+        self.files = {'main': 'data.json'}
         self.trees_url = f"{self.base_url}/trees"
 
-        # Loaded data cache
+        # Data caches
         self.data = {}
-        self.civ_trees = {}  # Separate cache for individual civ trees
-        # Remote trees index cache (filename list from GitHub API)
-        self._trees_index = None
-        self._trees_index_time = None
-        # Whether remote per-civ tree files are available (None = unknown)
-        self.trees_available = None
+        self.civ_trees = {}
+        self.unit_counters = {}
 
-        # Load data on initialization
+        # Load data
         self.load_all_data()
 
     def _get_cache_file(self, filename):
-        """Get the local cache file path"""
         return self.data_dir / filename
+
+    def _get_metadata_file(self, filename):
+        return self.data_dir / f"{filename}.meta"
+
+    def _check_for_updates(self):
+        """Check if GitHub data has been updated"""
+        try:
+            url = f"{self.api_base}?path=data&per_page=1"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+
+            commits = response.json()
+            if commits and len(commits) > 0:
+                last_commit_date = commits[0]['commit']['committer']['date']
+                last_commit_time = datetime.strptime(last_commit_date, '%Y-%m-%dT%H:%M:%SZ')
+
+                meta_file = self._get_metadata_file('data.json')
+                if meta_file.exists():
+                    with open(meta_file, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                        cached_time = datetime.fromisoformat(meta.get('last_update', '2000-01-01'))
+
+                        if last_commit_time > cached_time:
+                            print(f"GitHub data updated: {last_commit_date}")
+                            return True
+                else:
+                    return True
+
+        except Exception as e:
+            print(f"Could not check for updates: {e}")
+
+        return False
+
+    def _save_metadata(self, filename):
+        """Save metadata about the cached file"""
+        meta_file = self._get_metadata_file(filename)
+        metadata = {
+            'last_update': datetime.now().isoformat(),
+            'filename': filename
+        }
+        with open(meta_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2)
 
     def _is_cache_valid(self, filepath):
         """Check if cached file is still valid"""
         if not filepath.exists():
             return False
 
-        # Check file age
+        if self._check_for_updates():
+            print("GitHub data has been updated, invalidating cache...")
+            return False
+
         file_time = datetime.fromtimestamp(filepath.stat().st_mtime)
         age = datetime.now() - file_time
 
@@ -65,11 +155,11 @@ class DataManager:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
 
-            # Save to cache
             cache_file = self._get_cache_file(filename)
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(response.json(), f, indent=2)
 
+            self._save_metadata(filename)
             print(f"Downloaded {filename} successfully")
             return response.json()
         except requests.RequestException as e:
@@ -80,17 +170,14 @@ class DataManager:
         """Load a data file (from cache or download)"""
         cache_file = self._get_cache_file(filename)
 
-        # Use cache if valid
         if self._is_cache_valid(cache_file):
             print(f"Loading {filename} from cache...")
             with open(cache_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
 
-        # Download if cache invalid or missing
         url = f"{self.base_url}/{filename}"
         data = self._download_file(filename, url)
 
-        # Fallback to cache if download failed
         if data is None and cache_file.exists():
             print(f"Download failed, using cached {filename}")
             with open(cache_file, 'r', encoding='utf-8') as f:
@@ -102,24 +189,21 @@ class DataManager:
         """Load all data files"""
         print("Loading AoE2 data...")
 
-
         for key, filename in self.files.items():
             data = self._load_file(key, filename)
             if data:
                 self.data[key] = data
             else:
                 print(f"Warning: Failed to load {filename}")
-
                 self.data[key] = {}
 
-
-        # Load strings.json from its correct path (locales/en/)
+        # Load strings.json
         strings_data = self._load_strings()
         if strings_data:
             self.data['strings'] = strings_data
 
     def _load_strings(self):
-        """Load strings.json from the correct locales/en/ path"""
+        """Load strings.json"""
         cache_file = self.data_dir / 'strings.json'
 
         if self._is_cache_valid(cache_file):
@@ -135,36 +219,265 @@ class DataManager:
             data = response.json()
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
-            print("Downloaded strings.json successfully")
+            self._save_metadata('strings.json')
             return data
         except requests.RequestException as e:
             print(f"Error downloading strings.json: {e}")
             if cache_file.exists():
-                print("Using expired cache for strings.json")
                 with open(cache_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             return None
 
-    def force_update(self):
-        """Force download of fresh data"""
-        print("Forcing data update...")
+    def parse_armor(self, armor_data):
+        """
+        Parse armor data into readable format
 
-        for key, filename in self.files.items():
-            url = f"{self.base_url}/{filename}"
-            data = self._download_file(filename, url)
-            if data:
-                self.data[key] = data
+        Input: [{'Amount': 2, 'Class': 4}, {'Amount': 0, 'Class': 8}, ...]
+        Output: {'Melee': 2, 'Pierce': 2, 'Cavalry': 0, ...}
+        """
+        if not armor_data or not isinstance(armor_data, list):
+            return {'Melee': 0, 'Pierce': 0}
 
-        print("Data update complete!")
+        armor_dict = {}
+        for armor in armor_data:
+            if isinstance(armor, dict):
+                class_id = armor.get('Class')
+                amount = armor.get('Amount', 0)
+
+                # Get armor class name
+                class_name = self.ARMOR_CLASSES.get(class_id, f"Class {class_id}")
+
+                # Map base melee/pierce to simple names
+                if class_id == 4:
+                    armor_dict['Melee'] = amount
+                elif class_id == 3:
+                    armor_dict['Pierce'] = amount
+                elif amount > 0:  # Only include non-zero armor classes
+                    armor_dict[class_name] = amount
+
+        # Ensure Melee and Pierce are always present
+        if 'Melee' not in armor_dict:
+            armor_dict['Melee'] = 0
+        if 'Pierce' not in armor_dict:
+            armor_dict['Pierce'] = 0
+
+        return armor_dict
+
+    def parse_attacks(self, attack_data):
+        """
+        Parse attack bonuses into readable format
+
+        Input: [{'Amount': 3, 'Class': 29}, {'Amount': 2, 'Class': 21}, ...]
+        Output: {'Base': 4, 'vs Cavalry Archer': 3, 'vs Siege': 2, ...}
+
+        Note: Attacks are ONLY bonus damage. Base damage is stored separately in the 'Attack' field.
+        Class IDs 3 and 4 are 'Base Pierce' and 'Base Melee' which are NOT bonuses.
+        """
+        if not attack_data:
+            return {}
+
+        attacks = {}
+
+        # Handle different attack data formats
+        if isinstance(attack_data, (int, float)):
+            attacks['Base'] = attack_data
+        elif isinstance(attack_data, list):
+            for atk in attack_data:
+                if isinstance(atk, dict):
+                    class_id = atk.get('Class')
+                    amount = atk.get('Amount', 0)
+
+                    # Skip base melee (4) and base pierce (3) - these are not bonuses
+                    if amount > 0 and class_id not in [3, 4]:
+                        class_name = self.ARMOR_CLASSES.get(class_id, f"Class {class_id}")
+                        # Only add meaningful bonus attacks (not "Unused" etc)
+                        if class_name and class_name != 'Unused':
+                            attacks[f'vs {class_name}'] = amount
+
+        return attacks
+
+    def parse_description_string(self, help_id):
+        """
+        Parse any description string from strings.json by its help ID.
+
+        Works for units, technologies, and buildings. The developer-written
+        strings are patch-accurate; when the game is updated the strings are
+        updated too, so reading them directly keeps the bot correct for free.
+
+        Returns a dict with keys:
+            description  - first flavour sentence (after stripping the
+                           "Create/Build/Research <Name>" opener)
+            strong_vs    - list of targets this entity is strong against
+            weak_vs      - list of targets this entity is weak against
+            effect       - first sentence from upgrade/effect block (techs)
+        """
+        import re
+        import html as html_lib
+
+        strings = self.data.get('strings', {})
+        raw = strings.get(str(help_id), '')
+
+        empty = {'description': '', 'strong_vs': [], 'weak_vs': [], 'effect': ''}
+        if not raw:
+            return empty
+
+        # --- flatten HTML ---
+        text = re.sub(r'<br\s*/?>', '\n', raw, flags=re.IGNORECASE)
+        text = re.sub(r'<b>(.*?)</b>', r'\1', text, flags=re.DOTALL)
+        text = re.sub(r'<i>(.*?)</i>', r'\1', text, flags=re.DOTALL)
+        text = re.sub(r'<[^>]+>', '', text)
+        text = html_lib.unescape(text)
+        # Remove angle-bracket template placeholders like hp, attack, etc.
+        text = re.sub(r'[<>]', '', text)
+        # Remove parenthetical cost/placeholder tokens
+        text = re.sub(r'\([\w\s]+\)', '', text)
+        # Collapse whitespace, keep newlines
+        lines = [' '.join(l.split()) for l in text.splitlines()]
+        lines = [l.strip() for l in lines if l.strip()]
+
+        def split_targets(raw_text):
+            """'Infantry and Foot Archers, Siege Weapons' -> list"""
+            parts = re.split(r',\s*', raw_text)
+            result = []
+            for part in parts:
+                for s in re.split(r'\s+and\s+', part):
+                    s = re.sub(r'^and\s+', '', s.strip(), flags=re.IGNORECASE)
+                    if s:
+                        result.append(s)
+            return result
+
+        strong_vs  = []
+        weak_vs    = []
+        description = ''
+        effect     = ''
+
+        full_text = ' '.join(lines)
+
+        # Strong vs. / Weak vs. (units and buildings)
+        m = re.search(r'[Ss]trong\s+vs\.\s+([^.]+)\.', full_text)
+        if m:
+            strong_vs = split_targets(m.group(1))
+
+        m = re.search(r'[Ww]eak\s+vs\.\s+([^.]+)\.', full_text)
+        if m:
+            weak_vs = split_targets(m.group(1))
+
+        # Effect sentence: content of the <i>Upgrades / Researching...</i> block,
+        # expressed as the first sentence inside it (useful for tech descriptions).
+        upgrades_match = re.search(
+            r'[Uu]pgrades?[:\s]+(.+?)(?:Upgrades?|$)', full_text
+        )
+        if upgrades_match:
+            effect_raw = upgrades_match.group(1).strip().rstrip('.')
+            if effect_raw:
+                effect = effect_raw[:200]
+
+        # Flavour description: first sentence that is not the "Create/Build/
+        # Research <Name>" opener and does not contain counter or upgrade text.
+        for line in lines:
+            sentences = [s.strip() for s in line.split('.') if s.strip()]
+            for sentence in sentences:
+                low = sentence.lower()
+                if re.match(r'^(create|build|research|train)\b', low):
+                    continue
+                if any(kw in low for kw in ('strong vs', 'weak vs', 'upgrades', 'researching')):
+                    continue
+                if len(sentence) > 10:
+                    description = sentence
+                    break
+            if description:
+                break
+
+        return {
+            'description': description,
+            'strong_vs':   strong_vs,
+            'weak_vs':     weak_vs,
+            'effect':      effect,
+        }
+
+    # Keep the old name as an alias so existing callers don't break
+    def parse_unit_description(self, help_id):
+        return self.parse_description_string(help_id)
+
+    def get_unit_classification(self, unit_data):
+        """Determine unit classification based on unit data"""
+        unit_type = unit_data.get('internal_name', '').upper()
+
+        # Check for unit type patterns
+        if any(x in unit_type for x in ['ARCH', 'XBOW', 'LARCH']):
+            if 'AARCH' in unit_type or 'HCAVAL' in unit_type:
+                return 'Cavalry Archer'
+            return 'Archer'
+        elif any(x in unit_type for x in ['SPEAR', 'PIKE', 'HALBERD']):
+            return 'Infantry'
+        elif any(x in unit_type for x in ['SWORD', 'MILITIA', 'EAGLE', 'CONDOT']):
+            return 'Infantry'
+        elif any(x in unit_type for x in ['KNIGHT', 'PALAD', 'CAVAL']) and 'ARCH' not in unit_type:
+            return 'Cavalry'
+        elif any(x in unit_type for x in ['SCORP', 'ONAGR', 'TREB', 'RAM', 'BMBC']):
+            return 'Siege'
+        elif 'MONK' in unit_type:
+            return 'Monk'
+
+        return 'Other'
+
+    def get_unit_counters_from_data(self, unit_data):
+        """Get counter information based on actual unit data"""
+        classification = self.get_unit_classification(unit_data)
+        counter_info = self.UNIT_CLASSIFICATIONS.get(classification, {
+            'countered_by': [],
+            'strong_against': []
+        })
+
+        # Parse attack bonuses to determine what this unit is strong against
+        attacks = unit_data.get('Attacks', [])
+        strong_against_bonus = []
+
+        if isinstance(attacks, list):
+            for atk in attacks:
+                if isinstance(atk, dict):
+                    class_id = atk.get('Class')
+                    amount = atk.get('Amount', 0)
+                    if amount > 0:
+                        class_name = self.ARMOR_CLASSES.get(class_id, '')
+                        if class_name and class_name != 'Unused':
+                            strong_against_bonus.append(class_name)
+
+        return {
+            'classification': classification,
+            'countered_by': counter_info.get('countered_by', []),
+            'strong_against': counter_info.get('strong_against', []),
+            'bonus_damage_vs': strong_against_bonus
+        }
+
+    def _resolve_unit_name(self, unit_data, unit_id, strings):
+        """Resolve unit name from unit data"""
+        import re
+
+        lang_id = unit_data.get('LanguageNameId')
+        if lang_id:
+            string_id = str(lang_id + 9000)
+            name = strings.get(string_id)
+            if name and isinstance(name, str) and len(name) < 100:
+                cleaned = name.replace('<br>', ' ').replace('\n', ' ').strip()
+                cleaned = re.sub(r'\s+', ' ', cleaned)
+                if '<' not in cleaned and '>' not in cleaned and 2 < len(cleaned) < 50:
+                    return cleaned
+
+        internal = unit_data.get('internal_name', '')
+        if internal and (any(c.islower() for c in internal) or ' ' in internal):
+            return internal
+
+        return None
 
     def get_civ_names(self):
-        """Get list of all civilization names from data.json"""
+        """Get list of all civilization names"""
         main_data = self.data.get('main', {})
         civs = main_data.get('civs', {})
         return sorted(civs.keys())
 
     def get_civ_data(self, civ_name):
-        """Get civilization data by name (case-insensitive)"""
+        """Get civilization data by name"""
         main_data = self.data.get('main', {})
         civs = main_data.get('civs', {})
         civ_name_lower = civ_name.lower()
@@ -175,16 +488,9 @@ class DataManager:
         return None
 
     def get_civ_parsed_info(self, civ_name):
-        """Parse the help string for a civ into structured bonus data.
-
-        Returns a dict with keys:
-            civ_type   - e.g. "Cavalry civilization"
-            bonuses    - list of bonus strings
-            unique_units - list of unique unit name strings
-            unique_techs - list of unique tech name strings
-            team_bonus - string
-        """
-        import re, html as html_lib
+        """Parse civ help string into structured data"""
+        import re
+        import html as html_lib
 
         civ_data = self.get_civ_data(civ_name)
         if not civ_data:
@@ -204,7 +510,6 @@ class DataManager:
                 'team_bonus': '',
             }
 
-        # Strip HTML tags but keep structure
         def strip_tags(text):
             text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
             text = re.sub(r'<b>(.*?)</b>', r'\1', text, flags=re.DOTALL)
@@ -214,7 +519,7 @@ class DataManager:
 
         plain = strip_tags(raw)
         lines = [l.strip() for l in plain.splitlines()]
-        lines = [l.lstrip('\u2022').strip() for l in lines if l.strip()]
+        lines = [l.lstrip('\u2022\u2023\u25E6\u2043').strip() for l in lines if l.strip()]
 
         result = {
             'name': civ_data.get('name', civ_name),
@@ -255,148 +560,8 @@ class DataManager:
 
         return result
 
-    def load_civ_tree(self, civ_name):
-        """
-        Load individual civ tech tree from data/trees/
-        Returns the full tech tree data for a specific civilization
-        """
-        # Check cache first
-        if civ_name in self.civ_trees:
-            return self.civ_trees[civ_name]
-
-        # Construct filename (trees use lowercase with underscores)
-        # Normalized cache filename (always use lowercase with underscores for local cache)
-        normalized = civ_name.lower().replace(' ', '_')
-        filename = f"{normalized}.json"
-        cache_file = self.data_dir / f"tree_{filename}"
-
-        # Check if cached file is valid
-        if self._is_cache_valid(cache_file):
-            print(f"Loading {civ_name} tree from cache...")
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                tree_data = json.load(f)
-                self.civ_trees[civ_name] = tree_data
-                return tree_data
-
-        # Discover remote tree filenames and get best-matching remote candidates
-        remote_candidates = self._discover_remote_trees(normalized)
-
-        # If remote trees are not available, avoid making raw download attempts and use cache only
-        if not self.trees_available:
-            print(f"Remote per-civ tree files not available; using local cache only for {civ_name}.")
-            if cache_file.exists():
-                try:
-                    print(f"Using expired cache for {civ_name} tree")
-                    with open(cache_file, 'r', encoding='utf-8') as f:
-                        tree_data = json.load(f)
-                        self.civ_trees[civ_name] = tree_data
-                        return tree_data
-                except Exception as e:
-                    print(f"Error loading expired cache for {civ_name}: {e}")
-            return None
-
-        # Fallback: try common variants locally if remote discovery didn't find anything
-        fallback_variants = [
-            f"{civ_name}.json",
-            f"{civ_name.replace(' ', '_')}.json",
-            f"{civ_name.title()}.json",
-            f"{civ_name.capitalize()}.json",
-            f"{civ_name.lower()}.json",
-            f"{normalized}.json",
-            f"{civ_name.title().replace(' ', '_')}.json",
-        ]
-
-        # Compose final candidate list: discovered remote candidates first, then fallback unique variants
-        candidates = []
-        for rc in (remote_candidates or []):
-            if rc and rc not in candidates:
-                candidates.append(rc)
-        for fv in fallback_variants:
-            if fv not in candidates:
-                candidates.append(fv)
-
-        last_error = None
-        print(f"Attempting to download tech tree for {civ_name} (trying {len(candidates)} variants)...")
-        for cand in candidates:
-            url = f"{self.trees_url}/{cand}"
-            try:
-                print(f"Downloading {cand} from {url}...")
-                response = requests.get(url, timeout=30)
-                response.raise_for_status()
-                tree_data = response.json()
-
-                # Save to cache (always under normalized cache filename)
-                with open(cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(tree_data, f, indent=2)
-
-                self.civ_trees[civ_name] = tree_data
-                print(f"Downloaded {cand} successfully")
-                return tree_data
-            except requests.RequestException as e:
-                last_error = e
-                print(f"Error downloading {cand}: {e}")
-                continue
-
-        # If we reach here, all download attempts failed
-        print(f"Failed to download tech tree for {civ_name}. Last error: {last_error}")
-
-        # Try to load from cache even if expired
-        if cache_file.exists():
-            try:
-                print(f"Using expired cache for {civ_name} tree")
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    tree_data = json.load(f)
-                    self.civ_trees[civ_name] = tree_data
-                    return tree_data
-            except Exception as e:
-                print(f"Error loading expired cache for {civ_name}: {e}")
-
-        # Mark remote trees as unavailable to avoid repeated 404s on future calls
-        self.trees_available = False
-        return None
-
-    def _resolve_unit_name(self, unit_data, unit_id, strings):
-        """
-        Resolve unit name from unit data using LanguageNameId + offset
-
-        Args:
-            unit_data: Unit data dictionary
-            unit_id: Unit ID (as fallback)
-            strings: strings.json data
-
-        Returns:
-            Human-readable unit name or None if no good name found
-        """
-        # Try LanguageNameId + 9000 offset (this is how the game maps language IDs to string IDs)
-        lang_id = unit_data.get('LanguageNameId')
-        if lang_id:
-            string_id = str(lang_id + 9000)
-            name = strings.get(string_id)
-            if name and isinstance(name, str) and len(name) < 100:
-                # Clean up HTML breaks and normalize whitespace
-                import re
-                cleaned = name.replace('<br>', ' ').replace('\n', ' ').strip()
-                # Normalize multiple spaces to single space
-                cleaned = re.sub(r'\s+', ' ', cleaned)
-                # Only accept if it doesn't look like an HTML tag and has reasonable length
-                if '<' not in cleaned and '>' not in cleaned and 2 < len(cleaned) < 50:
-                    return cleaned
-
-        # Skip cryptic internal names - they are not useful for users
-        # These are typically ALL_CAPS codes like ARCHR, HCANR, ARELE, etc.
-        # We'll only return them if no better option exists
-        internal = unit_data.get('internal_name', '')
-        if internal:
-            # Check if internal name looks like a readable name (has lowercase letters or spaces)
-            # and is not just a code
-            if any(c.islower() for c in internal) or ' ' in internal:
-                return internal
-
-        # Return None for units without proper names - they'll be filtered out
-        return None
-
     def get_unit_names(self):
-        """Get all unit names from data.json"""
+        """Get all unit names"""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         units = data_section.get('Unit', {})
@@ -411,7 +576,7 @@ class DataManager:
         return sorted(unit_names)
 
     def get_unit_data(self, unit_name):
-        """Get unit data by name (case-insensitive)"""
+        """Get unit data by name with parsed armor and attacks"""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         units = data_section.get('Unit', {})
@@ -421,18 +586,51 @@ class DataManager:
         for unit_id, unit_data in units.items():
             resolved_name = self._resolve_unit_name(unit_data, unit_id, strings)
             if resolved_name and resolved_name.lower() == unit_name_lower:
+                # Parse armor properly
+                armor_raw = unit_data.get('Armours') or unit_data.get('Armor')
+                unit_data['Armor_Parsed'] = self.parse_armor(armor_raw)
+
+                # Parse attacks
+                attacks_raw = unit_data.get('Attacks') or unit_data.get('Attack')
+                unit_data['Attacks_Parsed'] = self.parse_attacks(attacks_raw)
+
+                # Counter info from armor-class heuristics (kept as fallback)
+                unit_data['Counter_Info'] = self.get_unit_counters_from_data(unit_data)
+
+                # Counter info parsed directly from the official description string
+                help_id = unit_data.get('LanguageHelpId')
+                unit_data['Description_Info'] = (
+                    self.parse_description_string(help_id) if help_id
+                    else {'description': '', 'strong_vs': [], 'weak_vs': [], 'effect': ''}
+                )
+
                 return {'name': resolved_name, **unit_data}
         return None
 
+    def search_units(self, query):
+        """Return all units whose resolved name contains the query string."""
+        main_data = self.data.get('main', {})
+        data_section = main_data.get('data', {})
+        units = data_section.get('Unit', {})
+        strings = self.data.get('strings', {})
+        query_lower = query.lower()
+
+        results = []
+        for unit_id, unit_data in units.items():
+            name = self._resolve_unit_name(unit_data, unit_id, strings)
+            if name and query_lower in name.lower():
+                results.append({'name': name, **unit_data})
+        return sorted(results, key=lambda u: u['name'])
+
     def get_tech_names(self):
-        """Get all technology names from data.json"""
+        """Get all technology names"""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         techs = data_section.get('Tech', {})
         return sorted(techs.keys())
 
     def get_tech_data(self, tech_name):
-        """Get technology data by name (case-insensitive)"""
+        """Get technology data by name, with description attached."""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         techs = data_section.get('Tech', {})
@@ -440,18 +638,24 @@ class DataManager:
 
         for name, data in techs.items():
             if name.lower() == tech_name_lower:
-                return {'name': name, **data}
+                result = {'name': name, **data}
+                help_id = data.get('LanguageHelpId')
+                result['Description_Info'] = (
+                    self.parse_description_string(help_id) if help_id
+                    else {'description': '', 'strong_vs': [], 'weak_vs': [], 'effect': ''}
+                )
+                return result
         return None
 
     def get_building_names(self):
-        """Get all building names from data.json"""
+        """Get all building names"""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         buildings = data_section.get('Building', {})
         return sorted(buildings.keys())
 
     def get_building_data(self, building_name):
-        """Get building data by name (case-insensitive)"""
+        """Get building data by name, with description and armor attached."""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         buildings = data_section.get('Building', {})
@@ -459,70 +663,32 @@ class DataManager:
 
         for name, data in buildings.items():
             if name.lower() == building_name_lower:
-                return {'name': name, **data}
+                result = {'name': name, **data}
+
+                # Parse armor so HP/armor fields show correctly
+                armor_raw = data.get('Armours') or data.get('Armor')
+                result['Armor_Parsed'] = self.parse_armor(armor_raw)
+
+                help_id = data.get('LanguageHelpId')
+                result['Description_Info'] = (
+                    self.parse_description_string(help_id) if help_id
+                    else {'description': '', 'strong_vs': [], 'weak_vs': [], 'effect': ''}
+                )
+                return result
         return None
 
-    def get_age_names(self):
-        """Get all age names from data.json"""
-        main_data = self.data.get('main', {})
-        age_names = main_data.get('age_names', {})
-        # age_names structure has nested data, extract the values
-        result = {}
-        for age_key, age_data in age_names.items():
-            if isinstance(age_data, dict):
-                result[age_key] = age_data
-            elif isinstance(age_data, list):
-                result[age_key] = age_data
-        return result
-
-    def get_tech_tree_strings(self):
-        """Get tech tree strings from data.json"""
-        main_data = self.data.get('main', {})
-        return main_data.get('tech_tree_strings', {})
-
-    def search_units(self, query):
-        """Search for units matching query"""
-        query_lower = query.lower()
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        units = data_section.get('Unit', {})
-        strings = self.data.get('strings', {})
-
-        matches = []
-        for unit_id, unit_data in units.items():
-            resolved_name = self._resolve_unit_name(unit_data, unit_id, strings)
-            if resolved_name and query_lower in resolved_name.lower():
-                matches.append({'name': resolved_name, **unit_data})
-
-        return matches
-
-    def search_techs(self, query):
-        """Search for technologies matching query"""
-        query_lower = query.lower()
-        main_data = self.data.get('main', {})
-        data_section = main_data.get('data', {})
-        techs = data_section.get('Tech', {})
-
-        matches = []
-        for tech_name, tech_data in techs.items():
-            if query_lower in tech_name.lower():
-                matches.append({'name': tech_name, **tech_data})
-
-        return matches
-
     def search_buildings(self, query):
-        """Search for buildings matching query"""
-        query_lower = query.lower()
+        """Return all buildings whose name contains the query string."""
         main_data = self.data.get('main', {})
         data_section = main_data.get('data', {})
         buildings = data_section.get('Building', {})
+        query_lower = query.lower()
 
-        matches = []
-        for building_name, building_data in buildings.items():
-            if query_lower in building_name.lower():
-                matches.append({'name': building_name, **building_data})
-
-        return matches
+        results = []
+        for name, data in buildings.items():
+            if query_lower in name.lower():
+                results.append({'name': name, **data})
+        return sorted(results, key=lambda b: b['name'])
 
     def get_data_info(self):
         """Get information about loaded data"""
@@ -534,10 +700,7 @@ class DataManager:
         info['units_count'] = len(data_section.get('Unit', {}))
         info['techs_count'] = len(data_section.get('Tech', {}))
         info['buildings_count'] = len(data_section.get('Building', {}))
-        info['ages_count'] = len(main_data.get('age_names', {}))
-        info['loaded_civ_trees'] = len(self.civ_trees)
 
-        # Get cache age
         data_file = self._get_cache_file('data.json')
         if data_file.exists():
             file_time = datetime.fromtimestamp(data_file.stat().st_mtime)
@@ -545,215 +708,53 @@ class DataManager:
 
         return info
 
-    def _fetch_remote_trees_index(self):
-        """Fetch the list of files in data/trees from the GitHub API and cache the result."""
-        # Use cached index if fresh
-        if self._trees_index and self._trees_index_time and (datetime.now() - self._trees_index_time) < timedelta(hours=self.cache_hours):
-            return self._trees_index
+    def force_update(self):
+        """Force download of fresh data"""
+        print("Forcing data update...")
 
-        api_url = "https://api.github.com/repos/SiegeEngineers/aoe2techtree/contents/data/trees"
+        for key, filename in self.files.items():
+            url = f"{self.base_url}/{filename}"
+            data = self._download_file(filename, url)
+            if data:
+                self.data[key] = data
+
+        strings_data = self._load_strings()
+        if strings_data:
+            self.data['strings'] = strings_data
+
+        print("Data update complete!")
+
+    def load_civ_tree(self, civ_name):
+        """Load civ tech tree"""
+        if civ_name in self.civ_trees:
+            return self.civ_trees[civ_name]
+
+        normalized = civ_name.lower().replace(' ', '_')
+        filename = f"{normalized}.json"
+        cache_file = self.data_dir / f"tree_{filename}"
+
+        if self._is_cache_valid(cache_file):
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                tree_data = json.load(f)
+                self.civ_trees[civ_name] = tree_data
+                return tree_data
+
+        url = f"{self.trees_url}/{filename}"
         try:
-            r = requests.get(api_url, timeout=30)
-            r.raise_for_status()
-            items = r.json()
-            remote_list = [it['name'] for it in items if it.get('type') == 'file']
-            self._trees_index = remote_list
-            self._trees_index_time = datetime.now()
-            self.trees_available = bool(remote_list)
-            return remote_list
-        except requests.RequestException as e:
-            print(f"Could not fetch remote trees index: {e}")
-            self.trees_available = False
-            return None
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            tree_data = response.json()
 
-    def _download_all_trees(self):
-        """Download all civilization tree files discovered in the repo's data/trees directory.
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(tree_data, f, indent=2)
 
-        Saves each tree under the local cache filename 'tree_{normalized}.json' where normalized is the remote file name
-        without extension lowercased (underscores preserved). Also populates self.civ_trees for any civs present
-        in data.json so `?civ` commands won't trigger on-demand downloads.
-        """
-        # Ensure main data loaded
-        main = self.data.get('main')
-        if not main:
-            return
+            self.civ_trees[civ_name] = tree_data
+            return tree_data
+        except requests.RequestException:
+            if cache_file.exists():
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    tree_data = json.load(f)
+                    self.civ_trees[civ_name] = tree_data
+                    return tree_data
 
-        remote_list = self._fetch_remote_trees_index()
-        if not remote_list:
-            return
-
-        civs = main.get('civs', {})
-        civ_names = list(civs.keys())
-
-        for remote_name in remote_list:
-            # remote_name is like 'MAGYARS.json' or 'magyars.json'
-            if not remote_name.lower().endswith('.json'):
-                continue
-            base = remote_name[:-5]
-            normalized = base.lower().replace(' ', '_')
-            cache_filename = f"tree_{normalized}.json"
-            cache_file = self.data_dir / cache_filename
-
-            # Skip download if cache is valid
-            if self._is_cache_valid(cache_file):
-                # Load into memory mapping if possible
-                try:
-                    with open(cache_file, 'r', encoding='utf-8') as f:
-                        tree_data = json.load(f)
-                    # Find matching civ display names and set mapping (prefer exact normalized match, else fuzzy match)
-                    matched = False
-                    for civ_display in civ_names:
-                        if civ_display.lower().replace(' ', '_') == normalized:
-                            self.civ_trees[civ_display] = tree_data
-                            matched = True
-                            break
-                    if not matched:
-                        # Try fuzzy match on normalized civ names
-                        civ_norms = [c.lower().replace(' ', '_') for c in civ_names]
-                        matches = difflib.get_close_matches(normalized, civ_norms, n=1, cutoff=0.6)
-                        if matches:
-                            idx = civ_norms.index(matches[0])
-                            self.civ_trees[civ_names[idx]] = tree_data
-                except Exception:
-                    pass
-                continue
-
-            # Download the raw file
-            url = f"{self.trees_url}/{remote_name}"
-            try:
-                print(f"Downloading {remote_name} from {url}...")
-                r = requests.get(url, timeout=30)
-                r.raise_for_status()
-                tree_data = r.json()
-                with open(cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(tree_data, f, indent=2)
-                # Populate mapping for matching civ(s) (exact normalized or fuzzy)
-                matched = False
-                for civ_display in civ_names:
-                    if civ_display.lower().replace(' ', '_') == normalized:
-                        self.civ_trees[civ_display] = tree_data
-                        matched = True
-                        break
-                if not matched:
-                    civ_norms = [c.lower().replace(' ', '_') for c in civ_names]
-                    matches = difflib.get_close_matches(normalized, civ_norms, n=1, cutoff=0.6)
-                    if matches:
-                        idx = civ_norms.index(matches[0])
-                        self.civ_trees[civ_names[idx]] = tree_data
-            except requests.RequestException as e:
-                print(f"Failed to download {remote_name}: {e}")
-                # continue trying other files
-                continue
-
-        # Summary: report which civs we populated and which remain missing
-        loaded = list(self.civ_trees.keys())
-        missing = [c for c in civ_names if c not in loaded]
-        print(f"Downloaded/loaded {len(loaded)} civ tree(s) into memory: {loaded}")
-        if missing:
-            print(f"Civs without tree data after startup: {missing}")
-        else:
-            print("All civs have tree data loaded into memory.")
-
-    def _discover_remote_trees(self, target):
-        """Discover available remote tree files via GitHub API"""
-        remote_candidates = []
-        api_failed = False
-        try:
-            # Use GitHub API to list files in data/trees
-            api_url = "https://api.github.com/repos/SiegeEngineers/aoe2techtree/contents/data/trees"
-            # Cache the index for cache_hours to avoid repeated API calls
-            if self._trees_index and self._trees_index_time and (datetime.now() - self._trees_index_time) < timedelta(hours=self.cache_hours):
-                remote_list = self._trees_index
-            else:
-                print(f"Querying GitHub API for available tree files...")
-                r = requests.get(api_url, timeout=30)
-                r.raise_for_status()
-                items = r.json()
-                remote_list = [it['name'] for it in items if it.get('type') == 'file']
-                self._trees_index = remote_list
-                self._trees_index_time = datetime.now()
-
-            if remote_list:
-                # Build normalized -> filename mapping for fuzzy matching
-                norm_map = {}
-                norm_keys = []
-                for name in remote_list:
-                    key = name.lower()
-                    # strip extension for better matching
-                    if key.endswith('.json'):
-                        key = key[:-5]
-                    norm_map[key] = name
-                    norm_keys.append(key)
-
-                # Use passed target (normalized civ name) to pick best matches
-                matches = difflib.get_close_matches(target, norm_keys, n=5, cutoff=0.5)
-                for m in matches:
-                    remote_candidates.append(norm_map.get(m))
-        except requests.RequestException as e:
-            print(f"Could not query GitHub API for tree filenames: {e}")
-            api_failed = True
-
-        # If API failed or returned no files, mark trees as unavailable
-        if api_failed or not (self._trees_index and len(self._trees_index) > 0):
-            if api_failed:
-                print("GitHub API query failed; remote tree files discovery aborted.")
-            else:
-                print("No remote tree files discovered via GitHub API; remote trees marked as unavailable.")
-
-            self.trees_available = False
-            return None
-
-        # If we reach here, remote trees were discovered
-        self.trees_available = True
-
-        # Optionally: log discovered remote candidates
-        print(f"Discovered remote tree files: {remote_candidates}")
-
-        # You can also return the list of discovered candidates if needed
-        return remote_candidates
-
-
-    def _download_strings(self):
-        """Download strings.json from GitHub and cache it"""
-        filename = self.files['strings']
-        url = f"{self.base_url}/{filename}"
-        return self._download_file(filename, url)
-
-if __name__ == '__main__':
-    # Test the data manager
-    dm = DataManager()
-
-    print("\n=== Data Info ===")
-    info = dm.get_data_info()
-    for key, value in info.items():
-        print(f"{key}: {value}")
-
-    print("\n=== All Civilizations ===")
-    civs = dm.get_civ_names()
-    print(f"Found {len(civs)} civilizations")
-    print(civs[:10], "...")
-
-    print("\n=== Test: Load Britons Tech Tree ===")
-    if 'Britons' in civs:
-        tree = dm.load_civ_tree('Britons')
-        if tree:
-            print(f"Loaded Britons tech tree with keys: {list(tree.keys())[:5]}")
-
-    print("\n=== Sample Units ===")
-    units = dm.get_unit_names()
-    print(f"Found {len(units)} units")
-    print(units[:10])
-
-    print("\n=== Sample Technologies ===")
-    techs = dm.get_tech_names()
-    print(f"Found {len(techs)} technologies")
-    print(techs[:10])
-
-    print("\n=== Sample Buildings ===")
-    buildings = dm.get_building_names()
-    print(f"Found {len(buildings)} buildings")
-    print(buildings[:10])
-
-    print("\n=== Search Test ===")
-    archer_units = dm.search_units('archer')
-    print(f"Units matching 'archer': {[u['name'] for u in archer_units[:5]]}")
+        return None

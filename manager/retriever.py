@@ -1,16 +1,12 @@
+# -*- coding: utf-8 -*-
 from fuzzywuzzy import fuzz, process
 from manager.data_manager import DataManager
 
 class DataRetriever:
-    """Retrieve and query AoE2 data from JSON files"""
+    """Retrieve and query AoE2 data with proper formatting"""
 
     def __init__(self, fuzzy_threshold=80):
-        """
-        Initialize the retriever
-
-        Args:
-            fuzzy_threshold: Minimum similarity score for fuzzy matching (0-100)
-        """
+        """Initialize the retriever"""
         self.data_manager = DataManager()
         self.fuzzy_threshold = fuzzy_threshold
 
@@ -63,18 +59,15 @@ class DataRetriever:
         return None
 
     def get_civ_info(self, civ_name):
-        """Get complete civilization information including tech tree"""
-        # Fuzzy match the name
+        """Get complete civilization information"""
         matched_name = self.fuzzy_match_civ(civ_name)
         if not matched_name:
             return None
 
-        # Get basic civ data from main data.json
         civ_data = self.data_manager.get_civ_data(matched_name)
         if not civ_data:
             return None
 
-        # Load full tech tree from data/trees/
         tech_tree = self.data_manager.load_civ_tree(matched_name)
 
         result = {
@@ -83,7 +76,6 @@ class DataRetriever:
             'tech_tree': tech_tree
         }
 
-        # Parse bonus info from strings.json via help_string_id
         parsed = self.data_manager.get_civ_parsed_info(matched_name)
         if parsed:
             result['civ_type'] = parsed.get('civ_type', '')
@@ -100,12 +92,12 @@ class DataRetriever:
         return result
 
     def get_unit_info(self, unit_name):
-        """Get unit information by name"""
+        """Get unit information with parsed armor and attacks"""
         matched_name = self.fuzzy_match_unit(unit_name)
         if not matched_name:
             return None
 
-        # Get unit data
+        # get_unit_data now includes parsed armor, attacks, and counter info
         unit_data = self.data_manager.get_unit_data(matched_name)
         if not unit_data:
             return None
@@ -118,7 +110,6 @@ class DataRetriever:
         if not matched_name:
             return None
 
-        # Get tech data
         tech_data = self.data_manager.get_tech_data(matched_name)
         if not tech_data:
             return None
@@ -131,7 +122,6 @@ class DataRetriever:
         if not matched_name:
             return None
 
-        # Get building data
         building_data = self.data_manager.get_building_data(matched_name)
         if not building_data:
             return None
@@ -181,6 +171,14 @@ class DataRetriever:
         """Get list of all buildings"""
         return self.data_manager.get_building_names()
 
+    def search_units(self, query):
+        """Search units by partial name match"""
+        return self.data_manager.search_units(query)
+
+    def search_buildings(self, query):
+        """Search buildings by partial name match"""
+        return self.data_manager.search_buildings(query)
+
     def force_data_update(self):
         """Force update of data from GitHub"""
         self.data_manager.force_update()
@@ -196,25 +194,25 @@ if __name__ == '__main__':
 
     print("=== Testing fuzzy matching ===")
     briton_match = retriever.fuzzy_match_civ('briton')
-    knight_match = retriever.fuzzy_match_unit('knght')
+    archer_match = retriever.fuzzy_match_unit('archer')
     print(f"'briton' matches: {briton_match}")
-    print(f"'knght' matches: {knight_match}")
+    print(f"'archer' matches: {archer_match}")
 
     print("\n=== All civilizations ===")
     civs = retriever.get_all_civs()
     print(f"Found {len(civs)} civilizations")
-    print(civs[:10] if len(civs) > 10 else civs)
 
     print("\n=== Data info ===")
     info = retriever.get_data_info()
     for key, value in info.items():
         print(f"{key}: {value}")
 
-    print("\n=== Test: Get civ info ===")
-    if civs and len(civs) > 0:
-        test_civ = civs[0]
-        civ_info = retriever.get_civ_info(test_civ)
-        if civ_info:
-            print(f"Name: {civ_info['name']}")
-            print(f"Bonuses: {civ_info.get('bonuses', [])[:3]}")
-            print(f"Unique units: {civ_info.get('unique_units', [])}")
+    print("\n=== Test: Archer unit with proper formatting ===")
+    archer = retriever.get_unit_info('Archer')
+    if archer:
+        print(f"\nUnit: {archer['name']}")
+        print(f"HP: {archer.get('HP')}")
+        print(f"Attack (raw): {archer.get('Attack')}")
+        print(f"Attacks (parsed): {archer.get('Attacks_Parsed')}")
+        print(f"Armor (parsed): {archer.get('Armor_Parsed')}")
+        print(f"Counter Info: {archer.get('Counter_Info')}")

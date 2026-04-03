@@ -40,32 +40,18 @@ class DataManager:
         36: "Hussite Wagons",
     }
 
-    # Unit type classifications for counter logic
+    # Unit type classifications - used only for the display label ("Cavalry Unit" etc.)
+    # Counter data (strong_against / countered_by) is intentionally NOT stored here
+    # because it is too coarse: Scout-line counters Monks while Knight-line is weak to
+    # Monks, but both are classified as "Cavalry". The game's own description strings
+    # (parsed by parse_description_string) are the authoritative source for counter info.
     UNIT_CLASSIFICATIONS = {
-        'Infantry': {
-            'countered_by': ['Archer', 'Cataphract', 'Jaguar Warrior', 'Hand Cannoneer', 'Slinger', 'Scorpion'],
-            'strong_against': ['Villager', 'Monk', 'Siege'],
-        },
-        'Archer': {
-            'countered_by': ['Skirmisher', 'Eagle Warrior', 'Huskarl', 'Siege Ram', 'Mangonel'],
-            'strong_against': ['Infantry', 'Villager', 'Siege'],
-        },
-        'Cavalry': {
-            'countered_by': ['Spearman', 'Pikeman', 'Halberdier', 'Camel', 'Kamayuk', 'Genoese Crossbowman', 'Monk'],
-            'strong_against': ['Archer', 'Siege', 'Monk', 'Villager'],
-        },
-        'Cavalry Archer': {
-            'countered_by': ['Skirmisher', 'Eagle Warrior', 'Huskarl', 'Genoese Crossbowman', 'Camel'],
-            'strong_against': ['Infantry', 'Archer', 'Siege'],
-        },
-        'Siege': {
-            'countered_by': ['Mangonel', 'Bombard Cannon', 'Cavalry', 'Onager'],
-            'strong_against': ['Building', 'Infantry (grouped)'],
-        },
-        'Monk': {
-            'countered_by': ['Scout', 'Eagle Warrior', 'Knight', 'Huskarl'],
-            'strong_against': ['Slow units', 'Expensive units'],
-        },
+        'Infantry':       {},
+        'Archer':         {},
+        'Cavalry':        {},
+        'Cavalry Archer': {},
+        'Siege':          {},
+        'Monk':           {},
     }
 
     def __init__(self, data_dir="data", cache_hours=24):
@@ -306,7 +292,7 @@ class DataManager:
 
         Returns a dict with keys:
             description  - first flavour sentence (after stripping the
-                           "Create/Build/Research <Name>" opener)
+                           "Create/Build/Research <name>" opener)
             strong_vs    - list of targets this entity is strong against
             weak_vs      - list of targets this entity is weak against
             effect       - first sentence from upgrade/effect block (techs)
@@ -337,11 +323,17 @@ class DataManager:
 
         def split_targets(raw_text):
             """'Infantry and Foot Archers, Siege Weapons' -> list"""
+            # Clean up the text first
+            raw_text = raw_text.strip().rstrip('.')
+
+            # Split by commas and 'and'
             parts = re.split(r',\s*', raw_text)
             result = []
             for part in parts:
+                # Split by 'and' but preserve compound names like "Spearman-line"
                 for s in re.split(r'\s+and\s+', part):
                     s = re.sub(r'^and\s+', '', s.strip(), flags=re.IGNORECASE)
+                    s = s.strip()
                     if s:
                         result.append(s)
             return result
@@ -354,13 +346,28 @@ class DataManager:
         full_text = ' '.join(lines)
 
         # Strong vs. / Weak vs. (units and buildings)
-        m = re.search(r'[Ss]trong\s+vs\.\s+([^.]+)\.', full_text)
+        # Try multiple patterns to catch variations
+
+        # Pattern 1: "Strong vs. X, Y, and Z."
+        m = re.search(r'[Ss]trong\s+vs\.?\s+([^.]+?)\.', full_text)
         if m:
             strong_vs = split_targets(m.group(1))
 
-        m = re.search(r'[Ww]eak\s+vs\.\s+([^.]+)\.', full_text)
+        # Pattern 2: "Weak vs. X, Y, and Z."
+        m = re.search(r'[Ww]eak\s+vs\.?\s+([^.]+?)\.', full_text)
         if m:
             weak_vs = split_targets(m.group(1))
+
+        # Pattern 3: Alternative "against" format
+        if not strong_vs:
+            m = re.search(r'[Ss]trong\s+against\s+([^.]+?)\.', full_text)
+            if m:
+                strong_vs = split_targets(m.group(1))
+
+        if not weak_vs:
+            m = re.search(r'[Ww]eak\s+against\s+([^.]+?)\.', full_text)
+            if m:
+                weak_vs = split_targets(m.group(1))
 
         # Effect sentence: content of the <i>Upgrades / Researching...</i> block,
         # expressed as the first sentence inside it (useful for tech descriptions).
@@ -373,14 +380,14 @@ class DataManager:
                 effect = effect_raw[:200]
 
         # Flavour description: first sentence that is not the "Create/Build/
-        # Research <Name>" opener and does not contain counter or upgrade text.
+        # Research <name>" opener and does not contain counter or upgrade text.
         for line in lines:
             sentences = [s.strip() for s in line.split('.') if s.strip()]
             for sentence in sentences:
                 low = sentence.lower()
                 if re.match(r'^(create|build|research|train)\b', low):
                     continue
-                if any(kw in low for kw in ('strong vs', 'weak vs', 'upgrades', 'researching')):
+                if any(kw in low for kw in ('strong vs', 'weak vs', 'strong against', 'weak against', 'upgrades', 'researching')):
                     continue
                 if len(sentence) > 10:
                     description = sentence
@@ -399,55 +406,68 @@ class DataManager:
     def parse_unit_description(self, help_id):
         return self.parse_description_string(help_id)
 
-    def get_unit_classification(self, unit_data):
-        """Determine unit classification based on unit data"""
+    def get_unit_classification(self, unit_data, display_name=''):
+        """Determine unit classification based on unit data.
+        Checks internal_name first, then falls back to the display name so that
+        units whose internal_name does not match (e.g. stored as an abbreviation
+        or numeric key) are still classified correctly.
+        """
         unit_type = unit_data.get('internal_name', '').upper()
+        # Combine both so either one can produce a match
+        search = unit_type + ' ' + display_name.upper()
 
-        # Check for unit type patterns
-        if any(x in unit_type for x in ['ARCH', 'XBOW', 'LARCH']):
-            if 'AARCH' in unit_type or 'HCAVAL' in unit_type:
+        if any(x in search for x in ['ARCH', 'XBOW', 'LARCH', 'ARBALEST', 'CROSSBOW']):
+            if any(x in search for x in ['CAVALRY ARCH', 'CAV ARCH', 'HCAVAL', 'AARCH']):
                 return 'Cavalry Archer'
             return 'Archer'
-        elif any(x in unit_type for x in ['SPEAR', 'PIKE', 'HALBERD']):
+        elif any(x in search for x in ['SPEAR', 'PIKE', 'HALBERD']):
             return 'Infantry'
-        elif any(x in unit_type for x in ['SWORD', 'MILITIA', 'EAGLE', 'CONDOT']):
+        elif any(x in search for x in ['SWORD', 'MILITIA', 'EAGLE', 'CONDOT',
+                                       'CHAMPION', 'LONGSWORD', 'MAN-AT-ARMS']):
             return 'Infantry'
-        elif any(x in unit_type for x in ['KNIGHT', 'PALAD', 'CAVAL']) and 'ARCH' not in unit_type:
+        elif any(x in search for x in ['KNIGHT', 'PALADIN', 'PALAD',
+                                       'HUSSAR', 'LANCER', 'CAVALIER']):
             return 'Cavalry'
-        elif any(x in unit_type for x in ['SCORP', 'ONAGR', 'TREB', 'RAM', 'BMBC']):
+        elif 'CAVAL' in search and 'ARCH' not in search:
+            return 'Cavalry'
+        elif any(x in search for x in ['SCORP', 'ONAGER', 'ONAGR', 'TREBUCHET',
+                                       'TREB', ' RAM', 'BMBC', 'CANNON',
+                                       'MANGONEL', 'BALLISTA']):
             return 'Siege'
-        elif 'MONK' in unit_type:
+        elif any(x in search for x in ['MONK', 'PRIEST']):
             return 'Monk'
+        elif any(x in search for x in ['SKIRMISHER', 'SKIRM']):
+            return 'Archer'
 
         return 'Other'
 
-    def get_unit_counters_from_data(self, unit_data):
-        """Get counter information based on actual unit data"""
-        classification = self.get_unit_classification(unit_data)
-        counter_info = self.UNIT_CLASSIFICATIONS.get(classification, {
-            'countered_by': [],
-            'strong_against': []
-        })
+    def get_unit_counters_from_data(self, unit_data, display_name=''):
+        """Get counter information based on actual unit data.
+        Only returns the unit classification label and any bonus damage targets
+        derived from the unit attack classes. Strong-against and countered-by
+        lists are intentionally absent; they come from parse_description_string.
+        """
+        classification = self.get_unit_classification(unit_data, display_name)
 
-        # Parse attack bonuses to determine what this unit is strong against
+        # Parse attack bonuses to determine explicit bonus damage targets.
+        # Classes 3 (Base Pierce) and 4 (Base Melee) are the unit's own base
+        # damage, not bonus damage vs a target type, so they are skipped.
         attacks = unit_data.get('Attacks', [])
-        strong_against_bonus = []
+        bonus_damage_vs = []
 
         if isinstance(attacks, list):
             for atk in attacks:
                 if isinstance(atk, dict):
                     class_id = atk.get('Class')
-                    amount = atk.get('Amount', 0)
-                    if amount > 0:
+                    amount   = atk.get('Amount', 0)
+                    if amount > 0 and class_id not in [3, 4]:
                         class_name = self.ARMOR_CLASSES.get(class_id, '')
                         if class_name and class_name != 'Unused':
-                            strong_against_bonus.append(class_name)
+                            bonus_damage_vs.append(class_name)
 
         return {
             'classification': classification,
-            'countered_by': counter_info.get('countered_by', []),
-            'strong_against': counter_info.get('strong_against', []),
-            'bonus_damage_vs': strong_against_bonus
+            'bonus_damage_vs': bonus_damage_vs,
         }
 
     def _resolve_unit_name(self, unit_data, unit_id, strings):
@@ -595,7 +615,7 @@ class DataManager:
                 unit_data['Attacks_Parsed'] = self.parse_attacks(attacks_raw)
 
                 # Counter info from armor-class heuristics (kept as fallback)
-                unit_data['Counter_Info'] = self.get_unit_counters_from_data(unit_data)
+                unit_data['Counter_Info'] = self.get_unit_counters_from_data(unit_data, resolved_name)
 
                 # Counter info parsed directly from the official description string
                 help_id = unit_data.get('LanguageHelpId')

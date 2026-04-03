@@ -252,25 +252,18 @@ class AoE2Commands(commands.Cog):
                 embed.add_field(name="Cost", value=_cost_str(cost), inline=True)
 
             # === COUNTERS SECTION ===
-            # Prefer description-based data (straight from the game text).
-            # Fall back to the armor-class heuristic when description data is absent.
-            desc_info = unit.get('Description_Info', {})
+            # Use only data sourced directly from the game's own description strings.
+            # The old classification-based heuristic (e.g. "all Cavalry strong vs Monk")
+            # was too coarse: Knight-line is weak to Monks while Scout-line counters them,
+            # but both were classified as "Cavalry". Showing wrong counter data is worse
+            # than showing nothing, so we only display what the game text confirms.
+            desc_info    = unit.get('Description_Info', {})
             counter_info = unit.get('Counter_Info', {})
 
-            # Get strong vs and weak vs from both sources, prefer description
-            strong_vs = desc_info.get('strong_vs', [])
-            weak_vs = desc_info.get('weak_vs', [])
+            strong_vs  = desc_info.get('strong_vs', [])
+            weak_vs    = desc_info.get('weak_vs', [])
+            bonus_dmg  = counter_info.get('bonus_damage_vs', [])
 
-            # If description doesn't have counter info, use heuristic
-            if not strong_vs:
-                strong_vs = counter_info.get('strong_against', [])
-            if not weak_vs:
-                weak_vs = counter_info.get('countered_by', [])
-
-            # Bonus damage from armor-class parsing (separate from "strong vs")
-            bonus_dmg = counter_info.get('bonus_damage_vs', [])
-
-            # Display strengths (either from description or bonus damage)
             if strong_vs:
                 embed.add_field(
                     name="Strong Against",
@@ -278,20 +271,20 @@ class AoE2Commands(commands.Cog):
                     inline=False
                 )
             elif bonus_dmg:
-                # Only show bonus damage if we don't have description-based strengths
+                # Factual bonus damage targets derived from the unit's actual attack classes
                 embed.add_field(
-                    name="Bonus Damage",
+                    name="Bonus Damage vs",
                     value=", ".join(bonus_dmg),
                     inline=False
                 )
 
-            # Display weaknesses
             if weak_vs:
                 embed.add_field(
                     name="Weak Against",
                     value=", ".join(weak_vs),
                     inline=False
                 )
+
 
             # === ATTACK BREAKDOWN (if complex) ===
             if attacks_parsed and len(attacks_parsed) > 2:
@@ -388,19 +381,15 @@ class AoE2Commands(commands.Cog):
             if classification != 'Other':
                 embed.description = f"*{classification} Unit*"
 
-            # Prefer description-based counters (from game text)
-            weak_vs = desc_info.get('weak_vs', [])
+            # Only use data sourced directly from the game's own description strings.
+            # The classification-based heuristic is removed because it is too coarse:
+            # Scout-line counters Monks, Knight-line is weak to Monks, but both are
+            # "Cavalry". Showing wrong data is worse than showing nothing.
+            weak_vs   = desc_info.get('weak_vs', [])
             strong_vs = desc_info.get('strong_vs', [])
-
-            # If description doesn't have counter info, use heuristic
-            if not weak_vs:
-                weak_vs = counter_info.get('countered_by', [])
-            if not strong_vs:
-                strong_vs = counter_info.get('strong_against', [])
-
             bonus_dmg = counter_info.get('bonus_damage_vs', [])
 
-            # Countered By
+            # Countered by
             if weak_vs:
                 embed.add_field(
                     name="Countered By",
@@ -410,11 +399,11 @@ class AoE2Commands(commands.Cog):
             else:
                 embed.add_field(
                     name="Countered By",
-                    value="No counter data available",
+                    value="No counter data in game description. Use `?unit` for full stats.",
                     inline=False
                 )
 
-            # Effective Against
+            # Effective against
             if strong_vs:
                 embed.add_field(
                     name="Effective Against",
@@ -422,9 +411,8 @@ class AoE2Commands(commands.Cog):
                     inline=False
                 )
             elif bonus_dmg:
-                # Only show bonus damage if we don't have description-based strengths
                 embed.add_field(
-                    name="Bonus Damage",
+                    name="Bonus Damage vs",
                     value=", ".join(bonus_dmg),
                     inline=False
                 )
